@@ -1,0 +1,8 @@
+[toolchain]
+# Needed for esp-hal.
+channel = "nightly"
+# Needed for esp-hal targeting ESP32C6 chips.
+targets = ["riscv32imac-unknown-none-elf"]
+# Note: I don't believe we need `components = ["rust-src"]`, as the esp-rs template uses, since we
+# don't need to recompile the core library when targeting ESP32C6 chips.
+

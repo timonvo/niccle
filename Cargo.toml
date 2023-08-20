@@ -1,0 +1,21 @@
+[package]
+name = "niccle"
+version = "0.1.0"
+readme = "README.md"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[workspace]
+members = ["esp"]
+
+[workspace.package]
+authors = ["Timon Van Overveldt <reachme@timonvo.com>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+# We don't have any tests or benchmarks yet, and this silence the 'can't find crate for `test`'
+# warning from `cargo fix --all-targets` in that case.
+bench = false
+test = false

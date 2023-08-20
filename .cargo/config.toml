@@ -1,0 +1,23 @@
+# Options to use when building for ESP32C6.
+[target.riscv32imac-unknown-none-elf]
+# A baud rate of 921600 is high, but it seems to work fine for me and speeds up the flashing time.
+runner = "espflash flash --baud=921600 --monitor"
+rustflags = [
+  "-C",
+  "link-arg=-Tlinkall.x",
+  # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
+  # NOTE: May negatively impact performance of produced code.
+  "-C",
+  "force-frame-pointers",
+]
+
+[env]
+ESP_LOGLEVEL = "info"
+
+# https://github.com/esp-rs/esp-template/blob/1729d9/.cargo/config.toml
+# includes `unstable.build-std = ["core"]` but that's only needed for ESP32-C3 and other chips which
+# don't supports atomics instructions and where atomics thus have to be emulated. It doesn't apply
+# to ESP32-C6.
+
+# We also don't set a default build target here. Instead we use the `package.default-target` line in
+# Cargo.toml to control that.
