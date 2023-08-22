@@ -7,6 +7,10 @@
 | `<toplevel>` | Contains chipset-agnostic code (which can run on ESP32, ARM etc.) |
 | `esp/`       | Contains ESP32-specific code.                                     |
 
+## Formatting the code
+
+We try to use `cargo fix --workspace` and `taplo fmt` (`cargo install taplo-cli`) to keep the code
+and .toml files formatted consistently.
 
 ## Running on ESP32C6
 The ESP32-related code focuses on RISC-V-based chipsets, and uses the `esp-hal` crate (rather than `esp-idf-hal`).

@@ -1,10 +1,10 @@
 [package]
-name = "niccle"
-version = "0.1.0"
-readme = "README.md"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "niccle"
+readme = "README.md"
+version = "0.1.0"
 
 [workspace]
 members = ["esp"]
