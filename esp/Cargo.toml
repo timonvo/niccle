@@ -6,7 +6,6 @@ license.workspace = true
 name = "niccle_esp"
 version = "0.1.0"
 # Ensures that rust-analyzer/VSCode can analyze the code in esp/.
-# This target is for the ESP32-C6.
 # Note that you still have to provide a "--target ..." argument to "cargo run" in order for it to
 # pick espflash as the runner (see https://github.com/rust-lang/cargo/issues/10779).
 default-target = "riscv32imac-unknown-none-elf"
@@ -22,3 +21,9 @@ esp-println = { version = "0.6.0", features = ["esp32c6", "log"] }
 hal = { package = "esp32c6-hal", version = "0.5.0" }
 log = { version = "0.4.18" }
 niccle = { path = "../" }
+
+[lib]
+# We don't have any tests or benchmarks yet, and this silence the 'can't find crate for `test`'
+# warning from `cargo fix --all-targets` in that case.
+bench = false
+test = false
