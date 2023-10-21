@@ -2,19 +2,16 @@
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-name = "niccle"
-readme = "README.md"
+name = "niccle_proc_macros"
 version = "0.1.0"
 
-[workspace]
-members = ["esp", "proc_macros"]
-
-[workspace.package]
-authors = ["Timon Van Overveldt <reachme@timonvo.com>"]
-edition = "2021"
-license = "Apache-2.0"
+[dependencies]
+proc-macro2 = "1.0.69"
+quote = "1.0.33"
+syn = "2.0.38"
 
 [lib]
+proc-macro = true
 # We don't have any tests or benchmarks yet, and this silences the 'can't find crate for `test`'
 # warning from `cargo fix --all-targets` in that case.
 bench = false
