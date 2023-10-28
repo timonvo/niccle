@@ -5,12 +5,12 @@
 //! many CPU cycles are spent executing each benchmark,
 //!
 //! WARNING: The observed results, and the rules defined in this example, are inherently fragile and
-//! chip-specific. They have currently only been run on an ESP32-C6 chip. I can re-run the benchmark
-//! and consistently get the same results when using a given toolchain version, but I wouldn't be
-//! surprised if some of the results change when run by others or when run with newer/older versions
-//! of the toolchain. The benchmarks are most useful when they reflect the particular situation
-//! you're interested in as closely as possible, and it's easy to add new benchmarks for additional
-//! cases.
+//! chip-specific. They have currently only been run on an ESP32-C3 and an ESP32-C6 chip. I can
+//! re-run the benchmark and consistently get the same results when using a given toolchain version,
+//! but I wouldn't be surprised if some of the results change when run by others or when run with
+//! newer/older versions of the toolchain. The benchmarks are most useful when they reflect the
+//! particular situation you're interested in as closely as possible, and it's easy to add new
+//! benchmarks for additional cases.
 //!
 //! Some of the benchmarks seem particularly fragile. For example, the memory load/store benchmarks
 //! seems to be dependent on the location and/or alignment of the memory buffers. In the past I've
@@ -35,6 +35,11 @@
 #![no_main]
 #![feature(asm_const)]
 
+#[cfg(feature = "esp32c3")]
+use esp32c3_hal as hal;
+#[cfg(feature = "esp32c6")]
+use esp32c6_hal as hal;
+
 use core::arch::asm;
 use esp_backtrace as _;
 use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, Delay};
@@ -50,6 +55,9 @@ const MPCMR: usize = 0x7E1;
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
+    #[cfg(feature = "esp32c3")]
+    let system = peripherals.SYSTEM.split();
+    #[cfg(feature = "esp32c6")]
     let system = peripherals.PCR.split();
     let clocks = ClockControl::max(system.clock_control).freeze();
     esp_println::logger::init_logger_from_env();
@@ -168,6 +176,19 @@ fn do_bench_single(bench: fn(u32) -> (&'static str, u32, u32), delay: &mut Delay
 ///
 /// We'll reference this part of the spec in some of the branch instruction comments below.
 pub mod cycles {
+    /// A macro that selects one the provided values, based on the chip currently being targeted.
+    macro_rules! chip_dependent {
+        (esp32c3=$esp32c3:expr, esp32c6=$esp32c6:expr) => {
+            if cfg!(feature = "esp32c3") {
+                $esp32c3
+            } else if cfg!(feature = "esp32c6") {
+                $esp32c6
+            } else {
+                panic!("pick a feature, either esp32c3 or esp32c6")
+            }
+        };
+    }
+
     /// The `nop` instruction.
     pub const NOP: u32 = 1;
     /// The `add` and `addi` instructions.
@@ -175,47 +196,53 @@ pub mod cycles {
     /// The `xor` instructions.
     pub const XOR: u32 = 1;
 
-    /// The `j` instruction. Most jumps take only one cycle.
-    pub const JUMP: u32 = 1;
-    /// The `j` instruction. Sometimes jumps take two cycles. At first I thought it happened with
-    /// all unaligned jump, but that doesn't seem be the case consistently.
+    /// The `j` instruction. On ESP32-C6 most jumps take only one cycle. On ESP32-C3 they all take two cycles.
+    pub const JUMP: u32 = chip_dependent!(esp32c3 = 2, esp32c6 = 1);
+    /// The `j` instruction. On ESP32-C6 sometimes jumps take two cycles instead of one. At first I
+    /// thought it happened with all unaligned jumps, but that doesn't seem be the case
+    /// consistently, at least not consistently.
     pub const JUMP_EXTRA_SLOW: u32 = 2;
 
-    /// The `lb` and `lbu` instructions. Initial load byte instructions take three cycles.
-    pub const LOAD_BYTE_INITIAL: u32 = 3;
+    /// The `lb` and `lbu` instructions. Initial load byte instructions take three cycles on
+    /// ESP32-C6, rather than two cycles for subsequent executions. On ESP32-C3 they all take two
+    /// cycles.
+    pub const LOAD_BYTE_INITIAL: u32 = chip_dependent!(esp32c3 = LOAD_BYTE_SUBSEQUENT, esp32c6 = 3);
     /// The `lb` and `lbu` instructions. Subsequent executions after the first execution take only
     /// two cycles.
     pub const LOAD_BYTE_SUBSEQUENT: u32 = 2;
-    /// The `lw` instruction. Load word instructions take two cycles. Contrary to the load byte
-    /// instruction, the first/initial instruction doesn't take an extra cycle.
+    /// The `lw` instruction. Load word instructions take two cycles. On ESP32-C6, contrary to the
+    /// load byte instruction, the first/initial instruction doesn't take an extra cycle.
     pub const LOAD_WORD: u32 = 2;
 
-    /// The `sb` instruction. Initial store byte instructions take two cycles.
-    pub const STORE_BYTE_INITIAL: u32 = 2;
-    /// The `sb` instruction. Subsequent executions after the first execution take only one cycle.
-    pub const STORE_BYTE_SUBSEQUENT: u32 = 1;
-    /// The `sw` instruction. Initial store word instructions take two cycles.
-    pub const STORE_WORD_INITIAL: u32 = 2;
-    /// The `sw` instruction. Subsequent executions after the first execution take only one cycle.
-    pub const STORE_WORD_SUBSEQUENT: u32 = 1;
+    /// The `sb` and `sw` instructions. Initial store byte instructions take two cycles on ESP32-C6,
+    /// rather than a single cycle for subsequent executions. They all take a single cycle on
+    /// ESP32-C3.
+    pub const STORE_INITIAL: u32 = chip_dependent!(esp32c3 = STORE_SUBSEQUENT, esp32c6 = 2);
+    /// The `sb` and `sw` instructions. Subsequent executions after the first execution take only
+    /// one cycle.
+    pub const STORE_SUBSEQUENT: u32 = 1;
 
     // --- INITIAL ENCOUNTERS OF CONDITIONAL BRANCHES WITH EXPECTED OUTCOMES.
     //
     /// The `beq`, `bne`, and similar instructions with a forward target label. When a forward
     /// branch is encountered for the first time and is not taken (in line with the RISC-V manual
-    /// spec), it takes two cycles. This is the same amount of cycles as for a taken backward branch
-    /// initially. This is also faster than a *taken* forward branch, which would be unexpected.
-    pub const BRANCH_FWD_NOT_TAKEN_INITIAL: u32 = 2;
+    /// spec), it takes two cycles on ESP32-C6, but only one cycle on ESP32-C3. In both cases this
+    /// is faster than a *taken* forward branch ([BRANCH_FWD_TAKEN]), which would be unexpected as
+    /// per the spec.
+    pub const BRANCH_FWD_NOT_TAKEN_INITIAL: u32 =
+        chip_dependent!(esp32c3 = BRANCH_FWD_NOT_TAKEN_SUBSEQUENT, esp32c6 = 2);
+
     /// The `beq`, `bne`, and similar instructions with a backward target label. When a backward
     /// branch is encountered for the first time and is taken (in line with the RISC-V manual spec),
-    /// it takes two cycles. This is the same amount of cycles as for a non-taken forward branch
-    /// initially. This is also faster than a *non-taken* backward branch, which would be
-    /// unexpected.
-    pub const BRANCH_BACK_TAKEN_INITIAL: u32 = 2;
-    /// The `beq`, `bne`, and similar instructions with a backward target label. Sometimes an
-    /// initial taken backward branch takes four cycles instead of the usual two. It's not super
-    /// clear why.
-    pub const BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW: u32 = 4;
+    /// it takes two cycles on ESP32-C6 and three cycles on ESP32-C3. On ESP32-C6 this is faster
+    /// than a *non-taken* backward branch ([BRANCH_BACK_NOT_TAKEN]), which would be unexpected as
+    /// per the spec. One ESP32-C3 this is actually slower than [BRANCH_BACK_NOT_TAKEN].
+    pub const BRANCH_BACK_TAKEN_INITIAL: u32 = chip_dependent!(esp32c3 = 3, esp32c6 = 2);
+    /// The `beq`, `bne`, and similar instructions with a backward target label. On ESP32-C6
+    /// sometimes an initial taken backward branch takes four cycles instead of the usual two. It's
+    /// not super clear why. This doesn't happen on ESP32-C3.
+    pub const BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW: u32 =
+        chip_dependent!(esp32c3 = BRANCH_BACK_TAKEN_INITIAL, esp32c6 = 4);
 
     // --- REPEATED ENCOUNTERS OF CONDITIONAL BRANCHES WITH EXPECTED OUTCOMES.
     //
@@ -225,30 +252,33 @@ pub mod cycles {
     /// repeated backward taken branches.
     pub const BRANCH_FWD_NOT_TAKEN_SUBSEQUENT: u32 = 1;
     /// The `beq`, `bne`, and similar instructions with a backward target label. When a backward
-    /// taken branch is encountered more than once, it only takes one cycle. Presumably because some
-    /// further branch prediction mechanism or pipelining kicks in. This is the same as for repeated
-    /// forward non-taken branches.
-    pub const BRANCH_BACK_TAKEN_SUBSEQUENT: u32 = 1;
+    /// taken branch is encountered more than once, it only takes one cycle on ESP32-C6. Presumably
+    /// because some further branch prediction mechanism or pipelining kicks in. This is the same as
+    /// for repeated forward non-taken branches. On ESP32-C3 it actually takes three cycles, the
+    /// same as when the instruction is initially encountered, as if no branch prediction exists for
+    /// such branches.
+    pub const BRANCH_BACK_TAKEN_SUBSEQUENT: u32 =
+        chip_dependent!(esp32c3 = BRANCH_BACK_TAKEN_INITIAL, esp32c6 = 1);
 
     // --- ENCOUNTERS OF CONDITIONAL BRANCHES WITH UNEXPECTED OUTCOMES.
     //
     /// The `beq`, `bne`, and similar instructions with a forward target label. When a forward taken
-    /// branch is encountered it takes three cycles. This is the same as a non-taken backward
-    /// branch. It is also longer than a non-taken branch, and probably because they're not expected
-    /// to be taken in the usual case, as per the RISC-V manual.
+    /// branch is encountered it takes three (C6) / four (C3) cycles. This is the same as a
+    /// non-taken backward branch. It is also longer than a non-taken branch, and probably because
+    /// they're not expected to be taken in the usual case, as per the RISC-V manual.
     pub const BRANCH_FWD_TAKEN: u32 = 3;
     /// The `beq`, `bne`, and similar instructions with a forward target label. Sometimes a taken
-    /// forward branch takes four instead of three cycles. In our benchmark this is the case when
-    /// there's a non-jump instruction behind the conditional branch instruction. It could also be
-    /// the case that the non-taken branch in the final iteration takes three cycles instead of the
-    /// two cycles predicted by [BRANCH_FWD_NOT_TAKEN_INITIAL], it's to tell which is which.
-    pub const BRANCH_FWD_TAKEN_EXTRA_SLOW: u32 = 4;
+    /// forward branch an extra cycle compared to the usual [BRANCH_FWD_TAKEN]. In our benchmark
+    /// this is the case when there's a non-jump instruction behind the conditional branch
+    /// instruction.
+    pub const BRANCH_FWD_TAKEN_EXTRA_SLOW: u32 = chip_dependent!(esp32c3 = 3, esp32c6 = 4);
 
-    /// The `beq`, `bne`, and similar instructions with a backward target label. When a backward
-    /// non-taken branch is encountered it takes three cycles. This is the same as a taken forward
-    /// branch. It is also longer than a non-taken branch, and probably because they are expected to
-    /// be taken in the usual case, as per the RISC-V manual.
-    pub const BRANCH_BACK_NOT_TAKEN: u32 = 3;
+    /// The `beq`, `bne`, and similar instructions with a backward target label. On ESP32-C6 when a
+    /// backward non-taken branch is encountered it takes three cycles. This is the same as a taken
+    /// forward branch. It is also longer than a non-taken branch, probably because they are
+    /// expected to be taken in the usual case, as per the RISC-V spec. One ESP32-C3 backward
+    /// non-taken branches take a single cycle, just like non-taken forward branches.
+    pub const BRANCH_BACK_NOT_TAKEN: u32 = chip_dependent!(esp32c3 = 1, esp32c6 = 3);
 }
 
 /// Measures the case of a loop with a forward branch instruction that is taken for all but the last
@@ -461,7 +491,7 @@ fn branch_back_usually_taken(iters: u32) -> (&'static str, u32, u32) {
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
 /// last iteration of the loop. The loop in turn also contains a forward branch instruction that is
-/// never taken. This represent a common scenario of a conditional loop with a rarely-taken bail-out
+/// never taken. This represents a common scenario of a conditional loop with a rarely-taken bail-out
 /// break condition.
 #[ram]
 fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32, u32) {
@@ -782,19 +812,19 @@ fn _branch_back_usually_taken_w_sb(
       data_end_ptr = in(reg) data_ptr_range.end,
       tmp = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::STORE_BYTE_INITIAL
+    let predicted_iter0 = cycles::STORE_INITIAL
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
         + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 = cycles::STORE_BYTE_SUBSEQUENT
+    let predicted_iter1 = cycles::STORE_SUBSEQUENT
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
         + cycles::BRANCH_BACK_TAKEN_INITIAL;
-    let predicted_iter_rest = cycles::STORE_BYTE_SUBSEQUENT
+    let predicted_iter_rest = cycles::STORE_SUBSEQUENT
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
@@ -874,19 +904,19 @@ fn _branch_back_usually_taken_w_sw(
       data_end_ptr = in(reg) data_ptr_range.end,
       tmp = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::STORE_WORD_INITIAL
+    let predicted_iter0 = cycles::STORE_INITIAL
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
         + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 = cycles::STORE_WORD_SUBSEQUENT
+    let predicted_iter1 = cycles::STORE_SUBSEQUENT
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
         + cycles::BRANCH_BACK_TAKEN_INITIAL;
-    let predicted_iter_rest = cycles::STORE_WORD_SUBSEQUENT
+    let predicted_iter_rest = cycles::STORE_SUBSEQUENT
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP

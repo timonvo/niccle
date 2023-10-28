@@ -11,6 +11,19 @@ rustflags = [
   "force-frame-pointers",
 ]
 
+# Options to use when building for ESP32C3.
+[target.riscv32imc-unknown-none-elf]
+# A baud rate of 921600 is high, but it seems to work fine for me and speeds up the flashing time.
+runner = "espflash flash --baud=921600 --monitor"
+rustflags = [
+  "-C",
+  "link-arg=-Tlinkall.x",
+  # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
+  # NOTE: May negatively impact performance of produced code.
+  "-C",
+  "force-frame-pointers",
+]
+
 [env]
 ESP_LOGLEVEL = "info"
 

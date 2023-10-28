@@ -3,6 +3,11 @@
 // We use this feature to write inline assembly with readable register names.
 #![feature(asm_const)]
 
+#[cfg(feature = "esp32c3")]
+use esp32c3_hal as hal;
+#[cfg(feature = "esp32c6")]
+use esp32c6_hal as hal;
+
 use core::arch::asm;
 use esp_backtrace as _;
 use hal::{clock::ClockControl, gpio::IO, peripherals::Peripherals, prelude::*, Delay};
@@ -29,6 +34,9 @@ const CSR_CPU_GPIO_OUT: u32 = 0x805;
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
+    #[cfg(feature = "esp32c3")]
+    let system = peripherals.SYSTEM.split();
+    #[cfg(feature = "esp32c6")]
     let system = peripherals.PCR.split();
     // Use the maximum available clock speed, since we want to maximize the GPIO speed we can
     // achieve.
@@ -45,6 +53,9 @@ fn main() -> ! {
 
     // Enable dedicated GPIO for GPIO5.
     gpio5.connect_peripheral_to_output_with_options(
+        #[cfg(feature = "esp32c3")]
+        hal::gpio::OutputSignal::CPU_GPIO_0,
+        #[cfg(feature = "esp32c6")]
         hal::gpio::OutputSignal::CPU_GPIO_OUT0,
         false,
         false,

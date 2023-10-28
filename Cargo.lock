@@ -132,6 +132,7 @@ dependencies = [
  "embedded-io",
  "esp-hal-procmacros",
  "esp-riscv-rt",
+ "esp32c3",
  "esp32c6",
  "fugit",
  "nb 1.1.0",
@@ -180,6 +181,26 @@ checksum = "7639ac03e9fe4e6d5f1c0e90b95ce9478d487335f6684c22b3515e6dc3155d8f"
 dependencies = [
  "riscv",
  "riscv-rt-macros",
+]
+
+[[package]]
+name = "esp32c3"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69fd4d0ce57e7c801cba8d01b5a833db804c8596485f0764ef20f2a9e1eb53bf"
+dependencies = [
+ "critical-section",
+ "vcell",
+]
+
+[[package]]
+name = "esp32c3-hal"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98501cfeea3081911074cde8074533b2939e46bd3630b1cd3e89563d58148a00"
+dependencies = [
+ "cfg-if",
+ "esp-hal-common",
 ]
 
 [[package]]
@@ -287,6 +308,7 @@ version = "0.1.0"
 dependencies = [
  "esp-backtrace",
  "esp-println 0.6.0",
+ "esp32c3-hal",
  "esp32c6-hal",
  "log",
  "niccle",
