@@ -13,9 +13,8 @@ Currently this project targets only the ESP32-C6 chip.
 
 ## Formatting the code
 
-We try to use `cargo fix --workspace` and `taplo fmt`
-(`cargo install taplo-cli`) to keep the code and .toml files formatted
-consistently.
+I try to use the code and .toml files formatted with `cargo fix` and `taplo fmt`
+(`cargo install taplo-cli`), using the `fix.sh` script.
 
 ## Running on ESP32-C6
 
