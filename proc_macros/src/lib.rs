@@ -6,6 +6,9 @@ use quote::quote;
 /// before/after the assembly code is executed, and returns the delta. Can be used to count CPU
 /// cycles, executed instructions, etc.
 ///
+/// This macro guarantees that the first provided instruction will be placed at a 2-byte aligned
+/// address.
+///
 /// Performance counting must already have been enabled elsewhere. This macro only manages the
 /// performance counter count register.
 /// 
@@ -44,7 +47,9 @@ pub fn asm_with_perf_counter(input: TokenStream) -> TokenStream {
             "nop","nop","nop","nop",
             "csrw {mpccr}, 0", // resets the counter
             ".align 2",
-            "csrr {cycles_start}, {mpccr}",
+            "csrr {cycles_start}, {mpccr}", // This is 32-bit-long instruction.
+            // The first instruction in #parsed is guaranteed to be 2-byte aligned, since the
+            // previous instruction is 2-byte aligned and is 32 bits long.
             #parsed,
             cycles_start = out(reg) cycles_start,
             mpccr = const(MPCCR),

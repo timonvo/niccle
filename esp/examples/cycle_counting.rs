@@ -42,7 +42,7 @@ use esp32c6_hal as hal;
 
 use core::arch::asm;
 use esp_backtrace as _;
-use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, Delay};
+use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, Delay, IO};
 use log::{info, log};
 use niccle_proc_macros::asm_with_perf_counter;
 
@@ -50,6 +50,26 @@ use niccle_proc_macros::asm_with_perf_counter;
 const MPCER: usize = 0x7E0;
 /// The address of the Machine Performance Counter Mode Register.
 const MPCMR: usize = 0x7E1;
+
+/// This CSR isn't defined by the esp-rs/esp-hal framework yet (nor by the espressif/svd files),
+/// so we hardcode their addresses. See the "1.14 Dedicated IO" chapter of the technical
+/// reference manual.
+const CSR_CPU_GPIO_OUT: u32 = 0x805;
+/// For now the implementation is hardcoded to always use CPU output signal 0 when using
+/// dedicated IO on the TX pin. In the future we could try to make this more flexible, e.g.
+/// using an argument, or perhaps even a const generic parameter with a const expression bound.
+#[cfg(feature = "esp32c3")]
+pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = hal::gpio::OutputSignal::CPU_GPIO_0;
+#[cfg(feature = "esp32c6")]
+pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = hal::gpio::OutputSignal::CPU_GPIO_OUT0;
+/// The dedicated IO output signal index to use (from 0 to 7, where 0 corresponds to
+/// CPU_GPIO_OUT0). Based on whatever [TX_CPU_OUTPUT_SIGNAL] is set to.
+#[cfg(feature = "esp32c3")]
+const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize =
+    (TX_CPU_OUTPUT_SIGNAL as isize) - hal::gpio::OutputSignal::CPU_GPIO_0 as isize;
+#[cfg(feature = "esp32c6")]
+const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize =
+    (TX_CPU_OUTPUT_SIGNAL as isize) - hal::gpio::OutputSignal::CPU_GPIO_OUT0 as isize;
 
 /// Runs the set of benchmarks in a loop, printing results to the serial line.
 #[entry]
@@ -63,6 +83,19 @@ fn main() -> ! {
     esp_println::logger::init_logger_from_env();
     info!("Booted up!");
 
+    // Set up the dedicated GPIO feature on pin GPIO5, which some benchmarks use to allow us to
+    // observe the CPU timing with an oscilloscope.
+    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+    let mut tx_pin = io.pins.gpio7;
+    tx_pin.set_to_push_pull_output();
+    tx_pin.connect_peripheral_to_output_with_options(
+        TX_CPU_OUTPUT_SIGNAL,
+        false,
+        false,
+        true,
+        false,
+    );
+
     let mut delay = Delay::new(&clocks);
     loop {
         do_bench(branch_fwd_usually_taken, &mut delay);
@@ -71,6 +104,8 @@ fn main() -> ! {
         do_bench(branch_fwd_rarely_taken_w_unaligned_jmp_back, &mut delay);
         do_bench(branch_back_rarely_taken, &mut delay);
         do_bench(branch_back_usually_taken, &mut delay);
+        do_bench(branch_back_usually_taken_with_gpio, &mut delay);
+        do_bench(branch_back_usually_taken_with_final_nop, &mut delay);
         do_bench(branch_back_usually_taken_w_dead_branch_fwd, &mut delay);
         do_bench(branch_back_usually_taken_w_aligned_jmp_fwd, &mut delay);
         do_bench(branch_back_usually_taken_w_unaligned_jmp_fwd, &mut delay);
@@ -98,13 +133,14 @@ fn main() -> ! {
     }
 }
 
-/// Runs a given benchmark for 1, 2, 3, 10, and 1000 iterations, to validate that the predictions
-/// are valid for any number of iterations.
+/// Runs a given benchmark for 1, 2, 3, 4, and 1000 iterations, to validate that our predictions are
+/// valid for any number of iterations. I so far haven't seen any CPU behavior that differs between
+/// the 3rd and subsequent iterations.
 fn do_bench(bench: fn(u32) -> (&'static str, u32, u32), delay: &mut Delay) {
     do_bench_single(bench, delay, 1);
     do_bench_single(bench, delay, 2);
     do_bench_single(bench, delay, 3);
-    do_bench_single(bench, delay, 10);
+    do_bench_single(bench, delay, 4);
     do_bench_single(bench, delay, 1000);
 }
 
@@ -191,6 +227,8 @@ pub mod cycles {
 
     /// The `nop` instruction.
     pub const NOP: u32 = 1;
+    /// The `csrr*` instructions.
+    pub const CSRR: u32 = 1;
     /// The `add` and `addi` instructions.
     pub const ADD: u32 = 1;
     /// The `xor` instructions.
@@ -274,11 +312,17 @@ pub mod cycles {
     pub const BRANCH_FWD_TAKEN_EXTRA_SLOW: u32 = chip_dependent!(esp32c3 = 3, esp32c6 = 4);
 
     /// The `beq`, `bne`, and similar instructions with a backward target label. On ESP32-C6 when a
-    /// backward non-taken branch is encountered it takes three cycles. This is the same as a taken
-    /// forward branch. It is also longer than a non-taken branch, probably because they are
-    /// expected to be taken in the usual case, as per the RISC-V spec. One ESP32-C3 backward
-    /// non-taken branches take a single cycle, just like non-taken forward branches.
+    /// backward non-taken branch is encountered it takes three cycles in some cases, or four cycles
+    /// in other cases ([BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW]). This is longer than a non-taken branch,
+    /// probably because they are expected to be taken in the usual case, as per the RISC-V spec.
+    /// One ESP32-C3 backward non-taken branches take a single cycle, just like non-taken forward
+    /// branches.
     pub const BRANCH_BACK_NOT_TAKEN: u32 = chip_dependent!(esp32c3 = 1, esp32c6 = 3);
+
+    /// The `beq`, `bne`, and similar instructions with a backward target label sometimes take an
+    /// extra cycle on ESP32-C6.
+    pub const BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW: u32 =
+        chip_dependent!(esp32c3 = BRANCH_BACK_NOT_TAKEN, esp32c6 = 4);
 }
 
 /// Measures the case of a loop with a forward branch instruction that is taken for all but the last
@@ -287,17 +331,16 @@ pub mod cycles {
 #[ram]
 fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "addi {i}, {i}, 1",
-      "bne {i}, {iters}, 2f",
-      "j 3f",
-      ".align 2",
-      "2: j 1b",
-      ".align 2",
-      "3:",
-      iters = in(reg) iters,
-      i = inout(reg) 0 => _
+        "1:",
+        "addi {i}, {i}, 1",
+        "bne {i}, {iters}, 2f",
+        "j 3f",
+        ".align 2",
+        "2: j 1b",
+        ".align 2",
+        "3:",
+        iters = in(reg) iters,
+        i = inout(reg) 0 => _
     );
     // Two single-cycle instructions (addi, j) plus a non-taken forward branch.
     let predicted_iter0 = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
@@ -318,18 +361,17 @@ fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
 #[ram]
 fn branch_fwd_usually_taken_w_extra_instr(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "addi {i}, {i}, 1",
-      "bne {i}, {iters}, 2f",
-      "nop",
-      "j 3f",
-      ".align 2",
-      "2: j 1b",
-      ".align 2",
-      "3:",
-      iters = in(reg) iters,
-      i = inout(reg) 0 => _
+        "1:",
+        "addi {i}, {i}, 1",
+        "bne {i}, {iters}, 2f",
+        "nop",
+        "j 3f",
+        ".align 2",
+        "2: j 1b",
+        ".align 2",
+        "3:",
+        iters = in(reg) iters,
+        i = inout(reg) 0 => _
     );
     // Three single-cycle instructions (addi, nop, j) plus a non-taken forward branch.
     let predicted_iter0 =
@@ -362,15 +404,14 @@ fn branch_fwd_usually_taken_w_extra_instr(iters: u32) -> (&'static str, u32, u32
 #[ram]
 fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "addi {y}, {y}, 1",
-      "beq {y}, {iters}, 2f",
-      "j 1b",
-      ".align 2",
-      "2:",
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "1:",
+        "addi {y}, {y}, 1",
+        "beq {y}, {iters}, 2f",
+        "j 1b",
+        ".align 2",
+        "2:",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
     // One single-cycle instruction (addi) and a taken forward branch.
     let predicted_iter0 = cycles::ADD + cycles::BRANCH_FWD_TAKEN;
@@ -395,16 +436,15 @@ fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 #[ram]
 fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "nop",
-      "1:", // Not 2-byte aligned, due to the 16-bit instruction right before this one.
-      "addi {y}, {y}, 1",
-      "beq {y}, {iters}, 2f",
-      "j 1b",
-      ".align 2",
-      "2:",
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "nop",
+        "1:", // Not 2-byte aligned, due to the 16-bit instruction right before this one.
+        "addi {y}, {y}, 1",
+        "beq {y}, {iters}, 2f",
+        "j 1b",
+        ".align 2",
+        "2:",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
     let predicted_iter0 = cycles::NOP + cycles::ADD + cycles::BRANCH_FWD_TAKEN;
     let predicted_iter1 = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
@@ -432,29 +472,29 @@ fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u3
 #[ram]
 fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      "j 2f",
-      ".align 2",
-      "1:",
-      "j 3f",
-      ".align 2",
-      "2:",
-      "addi {y}, {y}, 1",
-      "beq {y}, {iters}, 1b",
-      "nop", // Without this nop the iterations take an extra cycle anyway.
-      "j 2b",
-      ".align 2",
-      "3:",
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "j 2f",
+        ".align 2",
+        "1:",
+        "j 3f",
+        ".align 2",
+        "2:",
+        "addi {y}, {y}, 1",
+        "beq {y}, {iters}, 1b",
+        "j 2b",
+        ".align 2",
+        "3:",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
     let predicted_iter0 =
         cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW + cycles::JUMP;
-    let predicted_iter_rest =
-        cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP + cycles::JUMP;
+    let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::JUMP;
+    let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
         1 => predicted_iter0,
-        2.. => predicted_iter0 + (predicted_iter_rest) * (iters - 1),
+        2 => predicted_iter0 + predicted_iter1,
+        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
     };
     ("BEQ BACK rarely taken", predicted, cycles)
 }
@@ -466,19 +506,14 @@ fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 #[ram]
 fn branch_back_usually_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "addi {y}, {y}, 1",
-      "bne {y}, {iters}, 1b",
-      "nop", // Without this nop the last iteration takes an extra cycle anyway.
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "1:",
+        "addi {y}, {y}, 1",
+        "bne {y}, {iters}, 1b",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
-    // Two single-cycle instructions (addi, nop) and a non-taken backward branch.
-    let predicted_iter0 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
-    // Two single-cycle instructions (addi, j) and a non-taken forward branch.
+    let predicted_iter0 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
     let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
-    // Two single-cycle instructions (addi, j) and a predicted non-taken forward branch.
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
@@ -489,6 +524,83 @@ fn branch_back_usually_taken(iters: u32) -> (&'static str, u32, u32) {
     ("BNE BACK usually taken", predicted, cycles)
 }
 
+/// Like [branch_back_usually_taken], but with dedicated GPIO instructions inserted between each
+/// instruction in the loop. This allows us to inspect the per-iteration timing with an
+/// oscilloscope.
+#[ram]
+fn branch_back_usually_taken_with_gpio(iters: u32) -> (&'static str, u32, u32) {
+    // Make sure the pin is set low at the start of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    // Run the benchmark, setting and clearing the pin between each instruction.
+    let cycles = asm_with_perf_counter!(
+        "1:",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+        "addi {y}, {y}, 1",
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        "bne {y}, {iters}, 1b",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
+    );
+    // Make sure the pin is set low at the end of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    let predicted_iter0 = cycles::CSRR
+        + cycles::ADD
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW
+        + cycles::CSRR;
+    let predicted_iter1 =
+        cycles::CSRR + cycles::ADD + cycles::CSRR + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest =
+        cycles::CSRR + cycles::ADD + cycles::CSRR + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter0,
+        2 => predicted_iter0 + predicted_iter1,
+        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+    };
+    ("BNE BACK usually taken w/ GPIO", predicted, cycles)
+}
+
+/// Like [branch_back_usually_taken] but with a final nop at the end. In this case the branch
+/// instruction one less CPU cycle, but the nop takes one additional CPU cycle, resulting in the
+/// same total number of CPU cycles.
+#[ram]
+fn branch_back_usually_taken_with_final_nop(iters: u32) -> (&'static str, u32, u32) {
+    let cycles = asm_with_perf_counter!(
+        "1:",
+        "addi {y}, {y}, 1",
+        "bne {y}, {iters}, 1b",
+        "nop", // This nop causes the non-taken branch instruction to take one fewer CPU cycle.
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
+    );
+    let predicted_iter0 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
+    let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter0,
+        2 => predicted_iter0 + predicted_iter1,
+        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+    };
+    ("BNE BACK usually taken w/ final NOP", predicted, cycles)
+}
+
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
 /// last iteration of the loop. The loop in turn also contains a forward branch instruction that is
 /// never taken. This represents a common scenario of a conditional loop with a rarely-taken bail-out
@@ -496,14 +608,14 @@ fn branch_back_usually_taken(iters: u32) -> (&'static str, u32, u32) {
 #[ram]
 fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      "1:",
-      "addi {y}, {y}, 1", // 16 bit instruction
-      "beq zero, {tmp}, 2f", // never taken, i.e. dead branch, 32bit instruction
-      "bne {y}, {iters}, 1b", // 32 bit instruction
-      "2:", // Guaranteed to be aligned
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _,
-      tmp = inout(reg) 1 => _
+        "1:",
+        "addi {y}, {y}, 1", // 16 bit instruction
+        "beq zero, {tmp}, 2f", // never taken, i.e. dead branch, 32bit instruction
+        "bne {y}, {iters}, 1b", // 32 bit instruction
+        "2:", // Guaranteed to be aligned
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _,
+        tmp = inout(reg) 1 => _
     );
     let predicted_iter0 =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::BRANCH_BACK_NOT_TAKEN;
@@ -529,19 +641,17 @@ fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32
 #[ram]
 fn branch_back_usually_taken_w_aligned_jmp_fwd(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "j 2f",
-      ".align 2",
-      "2:",
-      "addi {y}, {y}, 1",
-      "bne {y}, {iters}, 1b",
-      "nop", // Without this nop the last iteration takes an extra cycle anyway.
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "1:",
+        "j 2f",
+        ".align 2",
+        "2:",
+        "addi {y}, {y}, 1",
+        "bne {y}, {iters}, 1b",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
     let predicted_iter0 =
-        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
+        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
     let predicted_iter1 = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
         cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
@@ -562,20 +672,17 @@ fn branch_back_usually_taken_w_aligned_jmp_fwd(iters: u32) -> (&'static str, u32
 #[ram]
 fn branch_back_usually_taken_w_unaligned_jmp_fwd(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "j 2f",
-      ".align 2",
-      "nop",
-      "2:", // Guaranteed to be unaligned.
-      "addi {y}, {y}, 1",
-      "bne {y}, {iters}, 1b",
-      "nop", // Without this nop the last iteration takes an extra cycle anyway.
-      iters = in(reg) iters,
-      y = inout(reg) 0 => _
+        "1:",
+        "j 2f",
+        ".align 2",
+        "nop",
+        "2:", // Guaranteed to be unaligned.
+        "addi {y}, {y}, 1",
+        "bne {y}, {iters}, 1b",
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
     );
-    let predicted_iter0 =
-        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
+    let predicted_iter0 = cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter1 = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
         cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
@@ -643,18 +750,17 @@ fn _branch_back_usually_taken_w_lbu(
     data.fill(1u8);
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      // LBU takes 2 or 3 cycles unconditionally. However, we must ensure there's actually a data
-      // dependency on the result of the load instruction, otherwise the CPU can just ignore it, and
-      // then it will often take just a single cycle (or more precisely, it seems to take 1 cycle
-      // every 3 out of 4 iterations, and 2 cycles every 4th iteration).
-      "lbu {tmp}, 0({data_ptr})",
-      "add {data_ptr}, {data_ptr}, {tmp}",
-      "bne {data_ptr}, {data_end_ptr}, 1b",
-      data_ptr = inout(reg) data_ptr_range.start => _,
-      data_end_ptr = in(reg) data_ptr_range.end,
-      tmp = out(reg) _
+        "1:",
+        // LBU takes 2 or 3 cycles unconditionally. However, we must ensure there's actually a data
+        // dependency on the result of the load instruction, otherwise the CPU can just ignore it, and
+        // then it will often take just a single cycle (or more precisely, it seems to take 1 cycle
+        // every 3 out of 4 iterations, and 2 cycles every 4th iteration).
+        "lbu {tmp}, 0({data_ptr})",
+        "add {data_ptr}, {data_ptr}, {tmp}",
+        "bne {data_ptr}, {data_end_ptr}, 1b",
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = out(reg) _
     );
     let predicted_iter0 = cycles::LOAD_BYTE_INITIAL + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter1 =
@@ -721,16 +827,19 @@ fn _branch_back_usually_taken_w_lw(
     data.fill(4u32);
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      "lw {tmp}, 0({data_ptr})",
-      "add {data_ptr}, {data_ptr}, {tmp}",
-      "bne {data_ptr}, {data_end_ptr}, 1b",
-      data_ptr = inout(reg) data_ptr_range.start => _,
-      data_end_ptr = in(reg) data_ptr_range.end,
-      tmp = out(reg) _
+        "1:",
+        "lw {tmp}, 0({data_ptr})",
+        "add {data_ptr}, {data_ptr}, {tmp}",
+        "bne {data_ptr}, {data_end_ptr}, 1b",
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = out(reg) _
     );
-    let predicted_iter0 = cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
+    // Note: this benchmark is still somewhat fragile. At times the last iteration takes one less
+    // cycle than what's listed here, and it's unclear whether this is due to the branch or load
+    // instruction being faster/slower sometimes.
+    let predicted_iter0 =
+        cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
     let predicted_iter1 = cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
         cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
@@ -796,21 +905,20 @@ fn _branch_back_usually_taken_w_sb(
 ) -> (&'static str, u32, u32) {
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
-      // results regardless of alignment/location of the data.
-      "xor {tmp}, {tmp}, zero",
-      "sb {tmp}, 0({data_ptr})",
-      // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
-      // predictable.
-      "nop",
-      "nop",
-      "addi {data_ptr}, {data_ptr}, 1",
-      "bne {data_ptr}, {data_end_ptr}, 1b",
-      data_ptr = inout(reg) data_ptr_range.start => _,
-      data_end_ptr = in(reg) data_ptr_range.end,
-      tmp = inout(reg) 0 => _
+        "1:",
+        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
+        // results regardless of alignment/location of the data.
+        "xor {tmp}, {tmp}, zero",
+        "sb {tmp}, 0({data_ptr})",
+        // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
+        // predictable.
+        "nop",
+        "nop",
+        "addi {data_ptr}, {data_ptr}, 1",
+        "bne {data_ptr}, {data_end_ptr}, 1b",
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = inout(reg) 0 => _
     );
     let predicted_iter0 = cycles::STORE_INITIAL
         + cycles::XOR
@@ -888,21 +996,20 @@ fn _branch_back_usually_taken_w_sw(
 ) -> (&'static str, u32, u32) {
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
-      ".align 2",
-      "1:",
-      // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
-      // results regardless of alignment/location of the data.
-      "xor {tmp}, {tmp}, zero",
-      "sw zero, 0({data_ptr})",
-      // without these nop every fourth `sw` takes more than one cycle and the loop becomes less
-      // predictable.
-      "nop",
-      "nop",
-      "addi {data_ptr}, {data_ptr}, 4",
-      "bne {data_ptr}, {data_end_ptr}, 1b",
-      data_ptr = inout(reg) data_ptr_range.start => _,
-      data_end_ptr = in(reg) data_ptr_range.end,
-      tmp = inout(reg) 0 => _
+        "1:",
+        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
+        // results regardless of alignment/location of the data.
+        "xor {tmp}, {tmp}, zero",
+        "sw zero, 0({data_ptr})",
+        // without these nop every fourth `sw` takes more than one cycle and the loop becomes less
+        // predictable.
+        "nop",
+        "nop",
+        "addi {data_ptr}, {data_ptr}, 4",
+        "bne {data_ptr}, {data_end_ptr}, 1b",
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = inout(reg) 0 => _
     );
     let predicted_iter0 = cycles::STORE_INITIAL
         + cycles::XOR
