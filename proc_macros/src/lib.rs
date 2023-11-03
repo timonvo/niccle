@@ -6,7 +6,7 @@ use quote::quote;
 /// before/after the assembly code is executed, and returns the delta. Can be used to count CPU
 /// cycles, executed instructions, etc.
 ///
-/// This macro guarantees that the first provided instruction will be placed at a 2-byte aligned
+/// This macro guarantees that the first provided instruction will be placed at a 4-byte aligned
 /// address.
 ///
 /// Performance counting must already have been enabled elsewhere. This macro only manages the
@@ -21,10 +21,10 @@ use quote::quote;
 #[proc_macro]
 pub fn asm_with_perf_counter(input: TokenStream) -> TokenStream {
 
-    // Note that `parsed` will generally contain both string literal and register definition entries.
-    // This means that we can prepend instructions to it, and append register definitions to it, and
-    // pass the combination of those to `asm!`, but not the other way around (e.g. we cannot append
-    // instructions to it).
+    // Note that `parsed` will generally contain both string literal and register definition
+    // entries. This means that we can prepend instructions to it, and append register definitions
+    // to it, and pass the combination of those to `asm!`, but not the other way around (e.g. we
+    // cannot append instructions to it).
     let parsed: proc_macro2::TokenStream = syn::parse(input).unwrap();
     TokenStream::from(quote! {
       unsafe {
@@ -45,11 +45,11 @@ pub fn asm_with_perf_counter(input: TokenStream) -> TokenStream {
             // this instruction, to remove any potential hazards that subsequent code may introduce,
             // and therefore try and increase repeatability of measurements.
             "nop","nop","nop","nop",
-            "csrw {mpccr}, 0", // resets the counter
-            ".align 2",
-            "csrr {cycles_start}, {mpccr}", // This is 32-bit-long instruction.
-            // The first instruction in #parsed is guaranteed to be 2-byte aligned, since the
-            // previous instruction is 2-byte aligned and is 32 bits long.
+            ".align 4",
+            "csrw {mpccr}, 0", // Resets the counter, 32-bit instruction.
+            "csrr {cycles_start}, {mpccr}", // Read the initial counter value, 32-bit instruction.
+            // The first instruction in #parsed is guaranteed to be 4-byte aligned, since the
+            // previous instruction is 4-byte aligned and is 32 bits long.
             #parsed,
             cycles_start = out(reg) cycles_start,
             mpccr = const(MPCCR),

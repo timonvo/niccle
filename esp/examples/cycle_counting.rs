@@ -103,8 +103,11 @@ fn main() -> ! {
         do_bench(branch_fwd_rarely_taken, &mut delay);
         do_bench(branch_fwd_rarely_taken_w_unaligned_jmp_back, &mut delay);
         do_bench(branch_back_rarely_taken, &mut delay);
-        do_bench(branch_back_usually_taken, &mut delay);
-        do_bench(branch_back_usually_taken_with_gpio, &mut delay);
+        do_bench(branch_back_rarely_taken_w_gpio, &mut delay);
+        do_bench(branch_back_usually_taken_aligned, &mut delay);
+        do_bench(branch_back_usually_taken_unaligned, &mut delay);
+        do_bench(branch_back_usually_taken_with_gpio_aligned, &mut delay);
+        do_bench(branch_back_usually_taken_with_gpio_unaligned, &mut delay);
         do_bench(branch_back_usually_taken_with_final_nop, &mut delay);
         do_bench(branch_back_usually_taken_w_dead_branch_fwd, &mut delay);
         do_bench(branch_back_usually_taken_w_aligned_jmp_fwd, &mut delay);
@@ -114,6 +117,7 @@ fn main() -> ! {
         do_bench(branch_back_usually_taken_w_lbu_align4, &mut delay);
         do_bench(branch_back_usually_taken_w_lbu_align8, &mut delay);
         do_bench(branch_back_usually_taken_w_lbu_align256, &mut delay);
+        do_bench(branch_back_usually_taken_w_lbu_align1_w_gpio, &mut delay);
         do_bench(branch_back_usually_taken_w_lw_align1, &mut delay);
         do_bench(branch_back_usually_taken_w_lw_align2, &mut delay);
         do_bench(branch_back_usually_taken_w_lw_align4, &mut delay);
@@ -124,6 +128,7 @@ fn main() -> ! {
         do_bench(branch_back_usually_taken_w_sb_align4, &mut delay);
         do_bench(branch_back_usually_taken_w_sb_align8, &mut delay);
         do_bench(branch_back_usually_taken_w_sb_align256, &mut delay);
+        do_bench(branch_back_usually_taken_w_sb_align1_w_gpio, &mut delay);
         do_bench(branch_back_usually_taken_w_sw_align1, &mut delay);
         do_bench(branch_back_usually_taken_w_sw_align2, &mut delay);
         do_bench(branch_back_usually_taken_w_sw_align4, &mut delay);
@@ -234,31 +239,18 @@ pub mod cycles {
     /// The `xor` instructions.
     pub const XOR: u32 = 1;
 
-    /// The `j` instruction. On ESP32-C6 most jumps take only one cycle. On ESP32-C3 they all take two cycles.
-    pub const JUMP: u32 = chip_dependent!(esp32c3 = 2, esp32c6 = 1);
+    /// The `j` instruction. On ESP32-C6 some jumps take only one cycle. On ESP32-C3 they all take
+    /// two cycles.
+    pub const JUMP: u32 = chip_dependent!(esp32c3 = JUMP_EXTRA_SLOW, esp32c6 = 1);
     /// The `j` instruction. On ESP32-C6 sometimes jumps take two cycles instead of one. At first I
     /// thought it happened with all unaligned jumps, but that doesn't seem be the case
     /// consistently, at least not consistently.
     pub const JUMP_EXTRA_SLOW: u32 = 2;
 
-    /// The `lb` and `lbu` instructions. Initial load byte instructions take three cycles on
-    /// ESP32-C6, rather than two cycles for subsequent executions. On ESP32-C3 they all take two
-    /// cycles.
-    pub const LOAD_BYTE_INITIAL: u32 = chip_dependent!(esp32c3 = LOAD_BYTE_SUBSEQUENT, esp32c6 = 3);
-    /// The `lb` and `lbu` instructions. Subsequent executions after the first execution take only
-    /// two cycles.
-    pub const LOAD_BYTE_SUBSEQUENT: u32 = 2;
-    /// The `lw` instruction. Load word instructions take two cycles. On ESP32-C6, contrary to the
-    /// load byte instruction, the first/initial instruction doesn't take an extra cycle.
-    pub const LOAD_WORD: u32 = 2;
-
-    /// The `sb` and `sw` instructions. Initial store byte instructions take two cycles on ESP32-C6,
-    /// rather than a single cycle for subsequent executions. They all take a single cycle on
-    /// ESP32-C3.
-    pub const STORE_INITIAL: u32 = chip_dependent!(esp32c3 = STORE_SUBSEQUENT, esp32c6 = 2);
-    /// The `sb` and `sw` instructions. Subsequent executions after the first execution take only
-    /// one cycle.
-    pub const STORE_SUBSEQUENT: u32 = 1;
+    /// The `lb`, `lbu`, `lw` instructions.
+    pub const LOAD: u32 = 2;
+    /// The `sb` and `sw` instructions.
+    pub const STORE: u32 = 1;
 
     // --- INITIAL ENCOUNTERS OF CONDITIONAL BRANCHES WITH EXPECTED OUTCOMES.
     //
@@ -276,11 +268,6 @@ pub mod cycles {
     /// than a *non-taken* backward branch ([BRANCH_BACK_NOT_TAKEN]), which would be unexpected as
     /// per the spec. One ESP32-C3 this is actually slower than [BRANCH_BACK_NOT_TAKEN].
     pub const BRANCH_BACK_TAKEN_INITIAL: u32 = chip_dependent!(esp32c3 = 3, esp32c6 = 2);
-    /// The `beq`, `bne`, and similar instructions with a backward target label. On ESP32-C6
-    /// sometimes an initial taken backward branch takes four cycles instead of the usual two. It's
-    /// not super clear why. This doesn't happen on ESP32-C3.
-    pub const BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW: u32 =
-        chip_dependent!(esp32c3 = BRANCH_BACK_TAKEN_INITIAL, esp32c6 = 4);
 
     // --- REPEATED ENCOUNTERS OF CONDITIONAL BRANCHES WITH EXPECTED OUTCOMES.
     //
@@ -320,14 +307,15 @@ pub mod cycles {
     pub const BRANCH_BACK_NOT_TAKEN: u32 = chip_dependent!(esp32c3 = 1, esp32c6 = 3);
 
     /// The `beq`, `bne`, and similar instructions with a backward target label sometimes take an
-    /// extra cycle on ESP32-C6.
-    pub const BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW: u32 =
+    /// extra cycle on ESP32-C6, when the instruction falls on a non-4 byte-aligned address (ending
+    /// in 0x2, 0x6, ...).
+    pub const BRANCH_BACK_NOT_TAKEN_INSTR_UNALIGNED: u32 =
         chip_dependent!(esp32c3 = BRANCH_BACK_NOT_TAKEN, esp32c6 = 4);
 }
 
 /// Measures the case of a loop with a forward branch instruction that is taken for all but the last
 /// iteration. This goes against the RISC-V manual guidance that forward branch instructions will be
-/// predicted not-taken initiallyy
+/// predicted not-taken initially.
 #[ram]
 fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
@@ -342,14 +330,12 @@ fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
         iters = in(reg) iters,
         i = inout(reg) 0 => _
     );
-    // Two single-cycle instructions (addi, j) plus a non-taken forward branch.
-    let predicted_iter0 = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
-    // Two single-cycle instructions plus a taken forward branch.
+    let predicted_iter_last = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_TAKEN + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2.. => predicted_iter0 + (predicted_iter_rest) * (iters - 1),
+        1 => predicted_iter_last,
+        2.. => predicted_iter_last + (predicted_iter_rest) * (iters - 1),
     };
 
     ("BNE FWD usually taken", predicted, cycles)
@@ -373,18 +359,15 @@ fn branch_fwd_usually_taken_w_extra_instr(iters: u32) -> (&'static str, u32, u32
         iters = in(reg) iters,
         i = inout(reg) 0 => _
     );
-    // Three single-cycle instructions (addi, nop, j) plus a non-taken forward branch.
-    let predicted_iter0 =
+    let predicted_iter_last =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::NOP + cycles::JUMP;
-    // Two single-cycle instructions (addi, j) plus a taken forward branch with a nop behind it, which makes it seem to take extra long.
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_FWD_TAKEN_EXTRA_SLOW + cycles::JUMP;
-    // Two single-cycle instructions (addi, j) plus a predicted taken forward branch.
+    let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_TAKEN_EXTRA_SLOW + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_TAKEN + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
 
     (
@@ -413,17 +396,14 @@ fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    // One single-cycle instruction (addi) and a taken forward branch.
-    let predicted_iter0 = cycles::ADD + cycles::BRANCH_FWD_TAKEN;
-    // Two single-cycle instructions (addi, j) and a non-taken forward branch.
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
-    // Two single-cycle instructions (addi, j) and a predicted non-taken forward branch.
+    let predicted_iter_last = cycles::ADD + cycles::BRANCH_FWD_TAKEN;
+    let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     ("BEQ FWD rarely taken", predicted, cycles)
 }
@@ -437,7 +417,7 @@ fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
         "nop",
-        "1:", // Not 2-byte aligned, due to the 16-bit instruction right before this one.
+        "1:", // Not 4 byte-aligned, due to the 16-bit instruction right before this one.
         "addi {y}, {y}, 1",
         "beq {y}, {iters}, 2f",
         "j 1b",
@@ -446,14 +426,14 @@ fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u3
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::NOP + cycles::ADD + cycles::BRANCH_FWD_TAKEN;
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
+    let predicted_iter_last = cycles::NOP + cycles::ADD + cycles::BRANCH_FWD_TAKEN;
+    let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (
         "BEQ FWD rarely taken w/ unaligned J BACK",
@@ -465,38 +445,112 @@ fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u3
 /// Measures the case of a loop with a backward branch instruction that is only taken in the last
 /// iteration of the loop. This goes against the RISC-V manual guidance that backward branch
 /// instructions will be predicted taken initially, and is not something you'd commonly write.
-///
-/// Note that the branch instruction in this benchmark exhibits some behavior that differs from most
-/// other benchmarks, which I can't really explain (see
-/// [cycles::BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW]).
 #[ram]
 fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-        "j 2f",
-        ".align 2",
-        "1:",
-        "j 3f",
-        ".align 2",
+        "j 2f", // 16-bit instruction.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+        "1:", // Hence, 4 byte-aligned.
+        "j 3f", // 16-bit instruction.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
         "2:",
-        "addi {y}, {y}, 1",
-        "beq {y}, {iters}, 1b",
-        "j 2b",
-        ".align 2",
-        "3:",
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
+        "addi {y}, {y}, 1", // 16-bit instruction.
+        "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+        "j 2b",  // Also 4 byte-aligned.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+        "3:", // Hence, 4 byte-aligned.
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 =
-        cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL_EXTRA_SLOW + cycles::JUMP;
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::JUMP;
-    let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW + cycles::JUMP;
+    let predicted_iter_last = cycles::JUMP_EXTRA_SLOW
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::BRANCH_BACK_TAKEN_INITIAL
+        + cycles::JUMP_EXTRA_SLOW;
+    let predicted_iter_rest =
+        cycles::NOP + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::JUMP;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2.. => predicted_iter_last + (predicted_iter_rest) * (iters - 1),
     };
     ("BEQ BACK rarely taken", predicted, cycles)
+}
+
+/// Like [branch_back_rarely_taken], but with dedicated GPIO instructions inserted between some of
+/// the each instructions in the loop. This allows us to inspect the per-iteration timing with an
+/// oscilloscope. When we do so, we can confirm that it is the jump instructions that take one extra
+/// cycle each, in the last iteration (rather than, say, the taken branch instruction taken longer).
+#[ram]
+fn branch_back_rarely_taken_w_gpio(iters: u32) -> (&'static str, u32, u32) {
+    // Make sure the pin is set low at the start of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    let cycles = asm_with_perf_counter!(
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        "j 4f", // 16-bit instruction.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+        "1:", // Hence, 4 byte-aligned.
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "j 3f", // 16-bit instruction.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+        "4:",
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "2:",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
+        "addi {y}, {y}, 1", // 16-bit instruction.
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "j 2b",  // Also 4 byte-aligned.
+        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+        "3:", // Hence, 4 byte-aligned.
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
+    );
+    // Make sure the pin is set low at the end of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+
+    let predicted_iter_last = cycles::CSRR
+        + cycles::JUMP_EXTRA_SLOW
+        + cycles::CSRR * 2
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::CSRR * 2
+        + cycles::BRANCH_BACK_TAKEN_INITIAL
+        + cycles::CSRR
+        + cycles::JUMP_EXTRA_SLOW
+        + cycles::CSRR;
+    let predicted_iter_rest = cycles::CSRR
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::CSRR * 2
+        + cycles::BRANCH_BACK_NOT_TAKEN
+        + cycles::CSRR
+        + cycles::JUMP;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter_last,
+        2.. => predicted_iter_last + (predicted_iter_rest) * (iters - 1),
+    };
+    ("BEQ BACK rarely taken w/ GPIO", predicted, cycles)
 }
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
@@ -504,31 +558,59 @@ fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 /// instructions will be predicted taken initially, and is a type of loop you might actually
 /// encounter in real code (e.g. a simple for loop with a counter as the exit condition).
 #[ram]
-fn branch_back_usually_taken(iters: u32) -> (&'static str, u32, u32) {
+fn branch_back_usually_taken_aligned(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {y}, {y}, 1",
-        "bne {y}, {iters}, 1b",
+        "1:", // This label and the first instruction are two-byte aligned.
+        "addi {y}, {y}, 1", // This is a 16-bit instruction.
+        "nop", // This is a 16-bit instruction, to ensure the next one is 4 byte-aligned.
+        "bne {y}, {iters}, 1b", // Hence, this is a 4 byte-aligned instruction.
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
+    let predicted_iter_first = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
+    };
+    ("BNE BACK usually taken aligned", predicted, cycles)
+}
+
+/// Like [branch_back_usually_taken] but with an unaligned jump target. This seems to have the same
+/// behavior, but it's good to verify since I previously saw unaligned unconditional jumps take
+/// longer than aligned unconditional jumps.
+#[ram]
+fn branch_back_usually_taken_unaligned(iters: u32) -> (&'static str, u32, u32) {
+    let cycles = asm_with_perf_counter!(
+        "1:", // This label and the first instruction are two-byte aligned.
+        "addi {y}, {y}, 1", // This is a 16-bit instruction
+        "bne {y}, {iters}, 1b", // Hence this instruction's address is *not* 4-byte-aligned.
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
+    );
+    // The branch is extra slow b/c the instruction is not 4 byte-aligned.
+    let predicted_iter_last = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_INSTR_UNALIGNED;
+    let predicted_iter_first = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
-    ("BNE BACK usually taken", predicted, cycles)
+    ("BNE BACK usually taken unaligned", predicted, cycles)
 }
 
-/// Like [branch_back_usually_taken], but with dedicated GPIO instructions inserted between each
-/// instruction in the loop. This allows us to inspect the per-iteration timing with an
-/// oscilloscope.
+/// Like [branch_back_usually_taken_aligned], but with dedicated GPIO instructions inserted between
+/// each instruction in the loop. This allows us to inspect the per-iteration timing with an
+/// oscilloscope. When we do so, we can confirm that in all cases the final iteration takes the same
+/// number of CPU cycles (i.e. the untaken backward branch always take the same number of cycles,
+/// regardless of whether one, two or more iterations are run).
 #[ram]
-fn branch_back_usually_taken_with_gpio(iters: u32) -> (&'static str, u32, u32) {
+fn branch_back_usually_taken_with_gpio_aligned(iters: u32) -> (&'static str, u32, u32) {
     // Make sure the pin is set low at the start of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -539,11 +621,12 @@ fn branch_back_usually_taken_with_gpio(iters: u32) -> (&'static str, u32, u32) {
     };
     // Run the benchmark, setting and clearing the pin between each instruction.
     let cycles = asm_with_perf_counter!(
-        "1:",
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
-        "addi {y}, {y}, 1",
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
-        "bne {y}, {iters}, 1b",
+        "1:", // 4 byte-aligned.
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        "addi {y}, {y}, 1", // 16-bit instruction
+        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction.
+        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
         "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
         csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
@@ -558,22 +641,85 @@ fn branch_back_usually_taken_with_gpio(iters: u32) -> (&'static str, u32, u32) {
         csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
-    let predicted_iter0 = cycles::CSRR
+    let predicted_iter_last = cycles::CSRR
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_NOT_TAKEN
+        + cycles::CSRR;
+    let predicted_iter_first =
+        cycles::CSRR + cycles::ADD + cycles::NOP + cycles::CSRR + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest = cycles::CSRR
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
+    };
+    ("BNE BACK usually taken w/ GPIO aligned", predicted, cycles)
+}
+
+/// Like [branch_back_usually_taken_unaligned], but with dedicated GPIO instructions inserted
+/// between each instruction in the loop. This allows us to inspect the per-iteration timing with an
+/// oscilloscope. When we do so, we can confirm that in all cases the final iteration takes the same
+/// number of CPU cycles (i.e. the untaken backward branch always take the same number of cycles,
+/// regardless of whether one, two or more iterations are run).
+#[ram]
+fn branch_back_usually_taken_with_gpio_unaligned(iters: u32) -> (&'static str, u32, u32) {
+    // Make sure the pin is set low at the start of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    // Run the benchmark, setting and clearing the pin between each instruction.
+    let cycles = asm_with_perf_counter!(
+        "1:",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        "addi {y}, {y}, 1", // 16-bit instruction
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "bne {y}, {iters}, 1b", // Hence, not 4 byte-aligned. !!!
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+        iters = in(reg) iters,
+        y = inout(reg) 0 => _
+    );
+    // Make sure the pin is set low at the end of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    let predicted_iter_last = cycles::CSRR
         + cycles::ADD
         + cycles::CSRR
-        + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW
+        // The branch is extra slow b/c the instruction is not 4 byte-aligned.
+        + cycles::BRANCH_BACK_NOT_TAKEN_INSTR_UNALIGNED
         + cycles::CSRR;
-    let predicted_iter1 =
+    let predicted_iter_first =
         cycles::CSRR + cycles::ADD + cycles::CSRR + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
         cycles::CSRR + cycles::ADD + cycles::CSRR + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
-    ("BNE BACK usually taken w/ GPIO", predicted, cycles)
+    (
+        "BNE BACK usually taken w/ GPIO unaligned",
+        predicted,
+        cycles,
+    )
 }
 
 /// Like [branch_back_usually_taken] but with a final nop at the end. In this case the branch
@@ -589,22 +735,22 @@ fn branch_back_usually_taken_with_final_nop(iters: u32) -> (&'static str, u32, u
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
-    let predicted_iter1 = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
+    let predicted_iter_first = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     ("BNE BACK usually taken w/ final NOP", predicted, cycles)
 }
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
 /// last iteration of the loop. The loop in turn also contains a forward branch instruction that is
-/// never taken. This represents a common scenario of a conditional loop with a rarely-taken bail-out
-/// break condition.
+/// never taken. This represents a common scenario of a conditional loop with a rarely-taken
+/// bail-out break condition.
 #[ram]
 fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
@@ -617,18 +763,18 @@ fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32
         y = inout(reg) 0 => _,
         tmp = inout(reg) 1 => _
     );
-    let predicted_iter0 =
+    let predicted_iter_last =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 =
+    let predicted_iter_first =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest = cycles::ADD
         + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT
         + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     ("BNE BACK usually taken w/ dead FWD BEQ", predicted, cycles)
 }
@@ -643,54 +789,54 @@ fn branch_back_usually_taken_w_aligned_jmp_fwd(iters: u32) -> (&'static str, u32
     let cycles = asm_with_perf_counter!(
         "1:",
         "j 2f",
-        ".align 2",
+        ".align 4",
         "2:",
-        "addi {y}, {y}, 1",
-        "bne {y}, {iters}, 1b",
+        "addi {y}, {y}, 1", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 =
-        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
-    let predicted_iter1 = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last =
+        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
+    let predicted_iter_first =
+        cycles::JUMP + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
-        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+        cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     ("BNE BACK usually taken w/ aligned J FWD", predicted, cycles)
 }
 
-/// Measures the case of a loop with a backward branch instruction that is taken in for all but the
-/// last iteration of the loop. The loop in turn also contains a forward jump instruction to an
-/// unaligned target.
-///
-/// This is meant to gauge the cost of the unconditional jump instructions.
+/// Like [branch_back_usually_taken_w_aligned_jmp_fwd] but with unconditional jump target that is
+/// *not* 4 byte-aligned. This is meant to check whether the jump target alignment matters (it
+/// doesn't seem to).
 #[ram]
 fn branch_back_usually_taken_w_unaligned_jmp_fwd(iters: u32) -> (&'static str, u32, u32) {
     let cycles = asm_with_perf_counter!(
         "1:",
         "j 2f",
-        ".align 2",
-        "nop",
+        ".align 4",
+        "nop", // 16-bit instruction
         "2:", // Guaranteed to be unaligned.
-        "addi {y}, {y}, 1",
-        "bne {y}, {iters}, 1b",
+        "addi {y}, {y}, 1", // 16-bit-instruction
+        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
         iters = in(reg) iters,
         y = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last = cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
+    let predicted_iter_first = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
         cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (
         "BNE BACK usually taken w/ unaligned J FWD",
@@ -702,39 +848,37 @@ fn branch_back_usually_taken_w_unaligned_jmp_fwd(iters: u32) -> (&'static str, u
 /// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 1-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lbu_align1(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken with LBU align(1)", unsafe {
+    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken w/ LBU align(1)", unsafe {
         &mut DATA_U8_ALIGN1.data
     })
 }
 /// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 2-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lbu_align2(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken with LBU align(2)", unsafe {
+    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken w/ LBU align(2)", unsafe {
         &mut DATA_U8_ALIGN2.data
     })
 }
-/// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 4-byte aligned data.
+/// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 4 byte-aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lbu_align4(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken with LBU align(4)", unsafe {
+    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken w/ LBU align(4)", unsafe {
         &mut DATA_U8_ALIGN4.data
     })
 }
 /// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 8-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lbu_align8(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken with LBU align(8)", unsafe {
+    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken w/ LBU align(8)", unsafe {
         &mut DATA_U8_ALIGN8.data
     })
 }
 /// See [_branch_back_usually_taken_w_lbu]. This runs the benchmark with 256-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lbu_align256(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lbu(
-        iters,
-        "BNE BACK usually taken with LBU align(256) ",
-        unsafe { &mut DATA_U8_ALIGN256.data },
-    )
+    _branch_back_usually_taken_w_lbu(iters, "BNE BACK usually taken w/ LBU align(256) ", unsafe {
+        &mut DATA_U8_ALIGN256.data
+    })
 }
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
@@ -751,67 +895,152 @@ fn _branch_back_usually_taken_w_lbu(
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
         "1:",
-        // LBU takes 2 or 3 cycles unconditionally. However, we must ensure there's actually a data
-        // dependency on the result of the load instruction, otherwise the CPU can just ignore it, and
-        // then it will often take just a single cycle (or more precisely, it seems to take 1 cycle
-        // every 3 out of 4 iterations, and 2 cycles every 4th iteration).
-        "lbu {tmp}, 0({data_ptr})",
-        "add {data_ptr}, {data_ptr}, {tmp}",
-        "bne {data_ptr}, {data_end_ptr}, 1b",
+        // LBU takes 2 cycles here. However, we must ensure there's actually a data dependency on
+        // the result of the load instruction, otherwise the CPU can just pipeline it, and then it
+        // will often take just a single cycle (or more precisely, it seems to take 1 cycle every 3
+        // out of 4 iterations, and 2 cycles every 4th iteration).
+        "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
+        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
         data_ptr = inout(reg) data_ptr_range.start => _,
         data_end_ptr = in(reg) data_ptr_range.end,
         tmp = out(reg) _
     );
-    let predicted_iter0 = cycles::LOAD_BYTE_INITIAL + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 =
-        cycles::LOAD_BYTE_SUBSEQUENT + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last =
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
+    let predicted_iter_first =
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
-        cycles::LOAD_BYTE_SUBSEQUENT + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (name, predicted, cycles)
+}
+
+/// Like [branch_back_usually_taken_w_lbu_align1], but with dedicated GPIO instructions inserted
+/// between some of the each instructions in the loop. This allows us to inspect the per-iteration
+/// timing with an oscilloscope. When we do so, we can confirm that the load instruction takes the
+/// same number of CPU cycles in all cases, and does not have differing behavior between the first
+/// execution and subsequent executions.
+#[ram]
+fn branch_back_usually_taken_w_lbu_align1_w_gpio(iters: u32) -> (&'static str, u32, u32) {
+    // Ensure that the data is filled with ones, since we rely on that to end the loop iteration.
+    let data_ptr_range;
+    unsafe {
+        DATA_U8_ALIGN1.data.fill(1u8);
+        data_ptr_range = DATA_U8_ALIGN1.data[0..iters as usize].as_ptr_range();
+    }
+
+    // Make sure the pin is set low at the start of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    // Run the benchmark, setting and clearing the pin between each instruction.
+    let cycles = asm_with_perf_counter!(
+        "1:",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        // Note that just like in _branch_back_usually_taken_w_lbu, we must use an `add` instruction
+        // to introduce a data dependency. Even more importantly in this benchmark: the `add`
+        // instruction must immediately follow the `lbu` instruction, we must not place the `csrr`
+        // instruction in between them, otherwise the CPU can seemingly make use of the instruction
+        // pipelining, and then the `lbu` instruction only takes a single CPU cycle three out of
+        // four times it's executed.
+        "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
+        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+        "nop", // 16-bit instructoin
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+        "bne {data_ptr}, {data_end_ptr}, 1b",  // Hence, 4 byte-aligned.
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = out(reg) _
+    );
+    // Make sure the pin is set low at the end of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+
+    let predicted_iter_last = cycles::CSRR
+        + cycles::LOAD
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_NOT_TAKEN
+        + cycles::CSRR;
+    let predicted_iter_first = cycles::CSRR
+        + cycles::LOAD
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest = cycles::CSRR
+        + cycles::LOAD
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::CSRR
+        + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
+    };
+    (
+        "BNE BACK usually taken w/ LBU align(1) w/ GPIO",
+        predicted,
+        cycles,
+    )
 }
 
 /// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 1-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lw_align1(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken with LW align(1)", unsafe {
+    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken w/ LW align(1)", unsafe {
         &mut DATA_U32_ALIGN1.data
     })
 }
 /// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 2-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lw_align2(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken with LW align(2)", unsafe {
+    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken w/ LW align(2)", unsafe {
         &mut DATA_U32_ALIGN2.data
     })
 }
-/// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 4-byte aligned data.
+/// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 4 byte-aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lw_align4(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken with LW align(4)", unsafe {
+    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken w/ LW align(4)", unsafe {
         &mut DATA_U32_ALIGN4.data
     })
 }
 /// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 8-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lw_align8(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken with LW align(8)", unsafe {
+    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken w/ LW align(8)", unsafe {
         &mut DATA_U32_ALIGN8.data
     })
 }
 /// See [_branch_back_usually_taken_w_lw]. This runs the benchmark with 256-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_lw_align256(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_lw(
-        iters,
-        "BNE BACK usually taken with LW align(256) ",
-        unsafe { &mut DATA_U32_ALIGN256.data },
-    )
+    _branch_back_usually_taken_w_lw(iters, "BNE BACK usually taken w/ LW align(256) ", unsafe {
+        &mut DATA_U32_ALIGN256.data
+    })
 }
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
@@ -828,26 +1057,25 @@ fn _branch_back_usually_taken_w_lw(
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
     let cycles = asm_with_perf_counter!(
         "1:",
-        "lw {tmp}, 0({data_ptr})",
-        "add {data_ptr}, {data_ptr}, {tmp}",
-        "bne {data_ptr}, {data_end_ptr}, 1b",
+        "lw {tmp}, 0({data_ptr})", // 32-bit instruction
+        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
         data_ptr = inout(reg) data_ptr_range.start => _,
         data_end_ptr = in(reg) data_ptr_range.end,
         tmp = out(reg) _
     );
-    // Note: this benchmark is still somewhat fragile. At times the last iteration takes one less
-    // cycle than what's listed here, and it's unclear whether this is due to the branch or load
-    // instruction being faster/slower sometimes.
-    let predicted_iter0 =
-        cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW;
-    let predicted_iter1 = cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_last =
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
+    let predicted_iter_first =
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
-        cycles::LOAD_WORD + cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+        cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (name, predicted, cycles)
 }
@@ -855,39 +1083,37 @@ fn _branch_back_usually_taken_w_lw(
 /// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 1-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sb_align1(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken with SB align(1)", unsafe {
+    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken w/ SB align(1)", unsafe {
         &DATA_U8_ALIGN1.data
     })
 }
 /// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 2-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sb_align2(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken with SB align(2)", unsafe {
+    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken w/ SB align(2)", unsafe {
         &DATA_U8_ALIGN2.data
     })
 }
-/// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 4-byte aligned data.
+/// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 4 byte-aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sb_align4(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken with SB align(4)", unsafe {
+    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken w/ SB align(4)", unsafe {
         &DATA_U8_ALIGN4.data
     })
 }
 /// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 8-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sb_align8(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken with SB align(8)", unsafe {
+    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken w/ SB align(8)", unsafe {
         &DATA_U8_ALIGN8.data
     })
 }
 /// See [_branch_back_usually_taken_w_sb]. This runs the benchmark with 256-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sb_align256(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sb(
-        iters,
-        "BNE BACK usually taken with SB align(256) ",
-        unsafe { &DATA_U8_ALIGN256.data },
-    )
+    _branch_back_usually_taken_w_sb(iters, "BNE BACK usually taken w/ SB align(256)", unsafe {
+        &DATA_U8_ALIGN256.data
+    })
 }
 
 /// Measures the case of a loop with a backward branch instruction that is taken in for all but the
@@ -908,81 +1134,177 @@ fn _branch_back_usually_taken_w_sb(
         "1:",
         // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
         // results regardless of alignment/location of the data.
-        "xor {tmp}, {tmp}, zero",
-        "sb {tmp}, 0({data_ptr})",
+        "xor {tmp}, {tmp}, zero", // 32-bit instruction
+        "sb {tmp}, 0({data_ptr})", // 32-bit instruction
         // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
         // predictable.
-        "nop",
-        "nop",
-        "addi {data_ptr}, {data_ptr}, 1",
-        "bne {data_ptr}, {data_end_ptr}, 1b",
+        "nop", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
+        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
         data_ptr = inout(reg) data_ptr_range.start => _,
         data_end_ptr = in(reg) data_ptr_range.end,
         tmp = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::STORE_INITIAL
+    let predicted_iter_last = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 = cycles::STORE_SUBSEQUENT
+    let predicted_iter_first = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_TAKEN_INITIAL;
-    let predicted_iter_rest = cycles::STORE_SUBSEQUENT
+    let predicted_iter_rest = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (name, predicted, cycles)
+}
+
+/// Like [branch_back_usually_taken_w_sb_align1], but with dedicated GPIO instructions inserted
+/// between some of the each instructions in the loop. This allows us to inspect the per-iteration
+/// timing with an oscilloscope. When we do so, we can confirm that the store instruction takes the
+/// same number of CPU cycles in all cases, and does not have differing behavior between the first
+/// execution and subsequent executions.
+#[ram]
+fn branch_back_usually_taken_w_sb_align1_w_gpio(iters: u32) -> (&'static str, u32, u32) {
+    // Ensure that the data is filled with ones, since we rely on that to end the loop iteration.
+    let data_ptr_range;
+    unsafe {
+        DATA_U8_ALIGN1.data.fill(1u8);
+        data_ptr_range = DATA_U8_ALIGN1.data[0..iters as usize].as_ptr_range();
+    }
+
+    // Make sure the pin is set low at the start of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    // Run the benchmark, setting and clearing the pin between each instruction.
+    let cycles = asm_with_perf_counter!(
+        "1:",
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
+        // results regardless of alignment/location of the data.
+        "xor {tmp}, {tmp}, zero", // 32-bit instruction
+        "sb {tmp}, 0({data_ptr})", // 32-bit instruction
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instructoin
+        // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
+        // predictable.
+        "nop", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
+        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+        data_ptr = inout(reg) data_ptr_range.start => _,
+        data_end_ptr = in(reg) data_ptr_range.end,
+        tmp = inout(reg) 0 => _
+    );
+    // Make sure the pin is set low at the end of the benchmark, without including this instruction
+    // in the cycle count.
+    unsafe {
+        asm!(
+        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
+        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
+    };
+    let predicted_iter_last = cycles::CSRR
+        + cycles::XOR
+        + cycles::STORE
+        + cycles::CSRR
+        + cycles::NOP
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::BRANCH_BACK_NOT_TAKEN
+        + cycles::CSRR;
+    let predicted_iter_first = cycles::CSRR
+        + cycles::XOR
+        + cycles::STORE
+        + cycles::CSRR
+        + cycles::NOP
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::BRANCH_BACK_TAKEN_INITIAL;
+    let predicted_iter_rest = cycles::CSRR
+        + cycles::XOR
+        + cycles::STORE
+        + cycles::CSRR
+        + cycles::NOP
+        + cycles::NOP
+        + cycles::ADD
+        + cycles::NOP
+        + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
+    let predicted = match iters {
+        0 => 0,
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
+    };
+    (
+        "BNE BACK usually taken w/ SB align(1) w/ GPIO",
+        predicted,
+        cycles,
+    )
 }
 
 /// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 1-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sw_align1(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken with SW align(1)", unsafe {
+    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken w/ SW align(1)", unsafe {
         &DATA_U32_ALIGN1.data
     })
 }
 /// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 2-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sw_align2(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken with SW align(2)", unsafe {
+    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken w/ SW align(2)", unsafe {
         &DATA_U32_ALIGN2.data
     })
 }
-/// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 4-byte aligned data.
+/// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 4 byte-aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sw_align4(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken with SW align(4)", unsafe {
+    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken w/ SW align(4)", unsafe {
         &DATA_U32_ALIGN4.data
     })
 }
 /// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 8-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sw_align8(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken with SW align(8)", unsafe {
+    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken w/ SW align(8)", unsafe {
         &DATA_U32_ALIGN8.data
     })
 }
 /// See [_branch_back_usually_taken_w_sw]. This runs the benchmark with 256-byte aligned data.
 #[ram]
 fn branch_back_usually_taken_w_sw_align256(iters: u32) -> (&'static str, u32, u32) {
-    _branch_back_usually_taken_w_sw(
-        iters,
-        "BNE BACK usually taken with SW align(256) ",
-        unsafe { &DATA_U32_ALIGN256.data },
-    )
+    _branch_back_usually_taken_w_sw(iters, "BNE BACK usually taken w/ SW align(256)", unsafe {
+        &DATA_U32_ALIGN256.data
+    })
 }
 
 // Measures the case of a loop with a backward branch instruction that is taken in for all but the
@@ -999,41 +1321,45 @@ fn _branch_back_usually_taken_w_sw(
         "1:",
         // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
         // results regardless of alignment/location of the data.
-        "xor {tmp}, {tmp}, zero",
-        "sw zero, 0({data_ptr})",
+        "xor {tmp}, {tmp}, zero", // 32-bit instruction
+        "sw zero, 0({data_ptr})", // 32-bit instruction
         // without these nop every fourth `sw` takes more than one cycle and the loop becomes less
         // predictable.
-        "nop",
-        "nop",
-        "addi {data_ptr}, {data_ptr}, 4",
-        "bne {data_ptr}, {data_end_ptr}, 1b",
+        "nop", // 16-bit instruction
+        "nop", // 16-bit instruction
+        "addi {data_ptr}, {data_ptr}, 4", // 16-bit instruction
+        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
         data_ptr = inout(reg) data_ptr_range.start => _,
         data_end_ptr = in(reg) data_ptr_range.end,
         tmp = inout(reg) 0 => _
     );
-    let predicted_iter0 = cycles::STORE_INITIAL
+    let predicted_iter_last = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_NOT_TAKEN;
-    let predicted_iter1 = cycles::STORE_SUBSEQUENT
+    let predicted_iter_first = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_TAKEN_INITIAL;
-    let predicted_iter_rest = cycles::STORE_SUBSEQUENT
+    let predicted_iter_rest = cycles::STORE
         + cycles::XOR
         + cycles::NOP
         + cycles::NOP
         + cycles::ADD
+        + cycles::NOP
         + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
     let predicted = match iters {
         0 => 0,
-        1 => predicted_iter0,
-        2 => predicted_iter0 + predicted_iter1,
-        3.. => predicted_iter0 + predicted_iter1 + (predicted_iter_rest) * (iters - 2),
+        1 => predicted_iter_last,
+        2 => predicted_iter_last + predicted_iter_first,
+        3.. => predicted_iter_last + predicted_iter_first + (predicted_iter_rest) * (iters - 2),
     };
     (name, predicted, cycles)
 }
