@@ -11,6 +11,7 @@ version = "0.1.0"
 default-target = "riscv32imac-unknown-none-elf"
 
 [dependencies]
+critical-section = "1.1.2"
 esp-backtrace = { version = "0.7.0", features = [
   "exception-handler",
   "panic-handler",
@@ -34,3 +35,8 @@ test = false
 default = ["esp32c6"]
 esp32c3 = ["esp-backtrace/esp32c3", "esp-println/esp32c3", "esp32c3-hal"]
 esp32c6 = ["esp-backtrace/esp32c6", "esp-println/esp32c6", "esp32c6-hal"]
+
+[[example]]
+# This example only supports the ESP32-C6 chip for the time being.
+name = "arp_request"
+required-features = ["esp32c6"]

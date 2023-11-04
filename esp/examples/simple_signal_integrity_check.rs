@@ -1,3 +1,16 @@
+//! This example binary performs a very basic signal integrity check, by emitting a link test pulse
+//! every ~16ms, as well emitting a waveform that mimics a packet transmission.
+//!
+//! As long as the circuit used for transmitting the signal is functional, then the link test pulse
+//! will make other devices think that a link has been established.
+//!
+//! The simulated packet signal can be inspected with an oscilloscope to validate that the circuit
+//! passes the waveform correctly. E.g. it can be used to check whether the signal isn't attenuated
+//! too strongly overall, whether the 5MHz and 10MHz frequencies aren't filtered too strongly
+//! specifically, whether the TP_IDL signal isn't filtered too strongly, and whether the
+//! differential voltage level returns to 0V sufficiently quickly after the line is left idle after
+//! a transmission.
+
 #![no_std]
 #![no_main]
 // We use this feature to write inline assembly with readable register names.
@@ -17,19 +30,6 @@ use log::info;
 // we hardcode their addresses. See the "1.14 Dedicated IO" chapter of the technical reference
 // manual.
 const CSR_CPU_GPIO_OUT: u32 = 0x805;
-
-/// This example binary performs a very basic signal integrity check, by emitting a link test pulse
-/// every ~16ms, as well emitting a waveform that mimics a packet transmission.
-///
-/// As long as the circuit used for transmitting the signal is functional, then the link test pulse
-/// will make other devices think that a link has been established.
-///
-/// The simulated packet signal can be inspected with an oscilloscope to validate that the circuit
-/// passes the waveform correctly. E.g. it can be used to check whether the signal isn't attenuated
-/// too strongly overall, whether the 5MHz and 10MHz frequencies aren't filtered too strongly
-/// specifically, whether the TP_IDL signal isn't filtered too strongly, and whether the
-/// differential voltage level returns to 0V sufficiently quickly after the line is left idle after
-/// a transmission.
 
 #[entry]
 fn main() -> ! {
