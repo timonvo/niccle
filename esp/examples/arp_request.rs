@@ -68,10 +68,33 @@ fn main() -> ! {
     // least 12 LTPs to have been sent.
     delay.delay_ms(200u32);
 
+    // Construct the packet by prepending the preamble and SFD to the frame data.
+    const PREAMBLE_W_SFD: [u8; 8] = [
+        // Preamble
+        0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101,
+        // SFD
+        0b11010101,
+    ];
+    let mut packet =
+        [0u8; (PREAMBLE_W_SFD.len() + niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW.len())];
+    packet[0..PREAMBLE_W_SFD.len()].copy_from_slice(&PREAMBLE_W_SFD);
+    packet[PREAMBLE_W_SFD.len()..]
+        .copy_from_slice(niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW);
+
+    // Print the packet contents to see what we're about to send out on the wire. Note that this is
+    // still the unencoded representation of the data.
+    info!("Packet contents:");
+    info!("----------------");
+    for (i, val) in packet.iter().enumerate() {
+        info!("{i:08}: {val:08b}")
+    }
+
     loop {
         info!("LTPs sent: {}", eth_phy.stats().ltps_sent);
 
-        // TODO: actually transmit a packet here.
+        // Transmit the packet (note that the Phy will Manchester-encode it as it is transmitted).
+        eth_phy.transmit_packet(&packet);
+        info!("Packets sent: {}", eth_phy.stats().packets_sent);
 
         delay.delay_ms(2000u32);
     }

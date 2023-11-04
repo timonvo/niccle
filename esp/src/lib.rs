@@ -49,8 +49,7 @@ pub mod eth_phy {
     /// dedicated IO on the TX pin. In the future we could try to make this more flexible, e.g.
     /// using an argument, or perhaps even a const generic parameter with a const expression bound.
     #[cfg(feature = "esp32c3")]
-    pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal =
-        hal::gpio::OutputSignal::CPU_GPIO_0;
+    pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = hal::gpio::OutputSignal::CPU_GPIO_0;
     #[cfg(feature = "esp32c6")]
     pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal =
         hal::gpio::OutputSignal::CPU_GPIO_OUT0;
@@ -105,6 +104,40 @@ pub mod eth_phy {
         pub fn stats(&mut self) -> TxStats {
             self.interrupt_handler
                 .use_attached_resources(|resources| resources.tx_stats)
+        }
+
+        /// Transmits the given Ethernet packet over the transmission line.
+        ///
+        /// Note that the packet must consist of the (unencoded) preamble, SFD and Ethernet frame
+        /// data. I.e. the caller is more or less responsible for the MAC layer, and this function
+        /// takes care of the PHY layer responsibilities like Manchester-encoding and TP_IDL
+        /// emission at the end of the transmission.
+        ///
+        /// Data will be transmitted one byte at a time, with transmission going in LSB-to-MSB
+        /// order.
+        ///
+        /// Note that for a maximum-length Ethernet packet of 1530 octets this method will take at
+        /// least 1224us to transmit. For a minimum-length Ethernet packet of 72 octets it will take
+        /// at least 57.85us.
+        ///
+        /// This method currently disables all interrupts during transmission, but that may be
+        /// improved in the future.
+        pub fn transmit_packet(&mut self, data: &[u8]) {
+            self.interrupt_handler.use_attached_resources(|resources| {
+                // Disable the LTP timer, since we we're about to transmit data and so no LTP will
+                // be needed for another 16ms.
+                resources.timer.set_alarm_active(false);
+                // TODO: Avoid doing the transmission within this `use_attached_resources` call,
+                // since that means we're disabling all interrupts during this potentially long
+                // period of time, and that may not always be desirable. E.g. perhaps we should
+                // allow transmissions to be interrupted, and re-transmit them post-hoc if and when
+                // we detect such interrupts have occurred.
+                transmit_packet(data, &mut *resources.tx_pin);
+                resources.tx_stats.packets_sent += 1;
+                // Re-activate the timer alarm so we get triggered after the next period has passed.
+                resources.timer.reset_counter();
+                resources.timer.set_alarm_active(true);
+            })
         }
     }
 
@@ -178,7 +211,6 @@ pub mod eth_phy {
         /// Callback to be invoked from the timer interrupt handler when timer interrupt fires.
         pub fn on_timer_interrupt(&'static self) {
             self.use_attached_resources(|resources| {
-                // TODO: actually transmit LTP
                 transmit_ltp(&mut *resources.tx_pin);
                 resources.tx_stats.ltps_sent += 1;
                 resources.timer.clear_interrupt();
@@ -206,6 +238,7 @@ pub mod eth_phy {
         tx_stats: TxStats,
     }
 
+    /// Reflects the initialization state of the [InterruptHandler].
     enum InterruptHandlerState<PTimer: 'static, PTx: 'static> {
         /// Initial state, where it is not attached to any peripheral yet and is effectively
         /// idle/unused.
@@ -237,20 +270,248 @@ pub mod eth_phy {
     /// mutually exclusive use of the pin's corresponding `TX_CPU_OUTPUT_SIGNAL`.
     ///
     // Note: the use of #[ram] is important, as it it ensures that there won't be any instruction
-    // execution delays, and each instruction will take 6.25ns.
+    // execution delays, and each instruction will take 6.25ns. See `A note on writing precisely
+    // timed assembly code` on [transmit_packet] below.
     #[ram]
     fn transmit_ltp(_tx_periph: &mut impl hal::gpio::OutputPin) {
         unsafe {
             asm!(
                 // Set the output high, and keep it high for 62.5ns (10 CPU cycles).
-                "csrrsi zero, {csr_cpu_gpio_out}, {cpu_signal_idx}", // 1 cycle
+                "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // 1 cycle
                 // 9 cycles
                 "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
                 // Set the output low.
-                "csrrci zero, {csr_cpu_gpio_out}, {cpu_signal_idx}",
+                "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}",
                 csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-                cpu_signal_idx= const(1 << TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+                cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
             );
         }
+    }
+
+    /// Transmits the given Ethernet packet over the transmission line.
+    ///
+    /// See [Phy::transmit_packet] for more info.
+    ///
+    /// # A note on writing precisely timed assembly code
+    ///
+    /// When transmitting data, each half of a Manchester-encoded bit symbol should take 50ns, for a
+    /// total of 100ns per bit symbol. Therefore, given a clock speed of 160MHz (enforced above), we
+    /// must use exactly eight CPU cycles between each signal transition. We can't really rely on
+    /// the compiler to generate code for us that adheres to this requirement, so we must write the
+    /// whole transmission control loop in assembly code instead, using the dedicated IO feature to
+    /// emit signals using just a single CPU cycle.
+    ///
+    /// Unsurprisingly that has its own perils. At 160MHz, each clock cycle takes 6.25ns. Some
+    /// instructions take just a single cycle to execute, but some can take more, and the behavior
+    /// is chip dependent and situation dependent. The `cycle_counting` example binary contains a
+    /// lot more useful information on this topic, as does the discussion at
+    /// https://ctrlsrc.io/posts/2023/counting-cpu-cycles-on-esp32c3-esp32c6/.
+    ///
+    /// For this particular function, the following insights gained from the `cycle_counting`
+    /// example binary are most relevant (focusing on the behavior on ESP32-C6 for now):
+    ///
+    /// * `csrr`, `andi`, xori`, and other simple instructions not otherwise called out below take 1
+    ///   CPU cycle.
+    /// * `lbu` instructions take 2 CPU cycles, as long as there is a data dependency immediately
+    ///   after them (i.e. an instruction that uses the result of the load instruction).
+    /// * `bne` instructions in this type of loop takes 3 CPU cycles when not taken (at the end of
+    ///   the iteration) if the instruction falls on a 4 byte-aligned address, and 4 CPU cycles when
+    ///   not taken and unaligned. They take 2 CPU cycles when taken for the first time (in the
+    ///   first iteration), and 1 CPU cycle when taken after having been taken before already (in
+    ///   the second to second-to-last iterations).
+    ///
+    /// See the [cycle_counting::branch_back_usually_taken] and
+    /// [cycle_counter::_branch_back_usually_taken_w_lbu] for the benchmarks showing this behavior
+    /// for the ESP32-C6 CPU.
+    ///
+    /// Note: the use of #[ram] is also important, as it it ensures that there won't be any
+    /// instruction execution delays, and each instruction will take 6.25ns.
+    #[ram]
+    fn transmit_packet(data: &[u8], _tx_periph: &mut impl hal::gpio::OutputPin) {
+        let data_ptr_range = data.as_ptr_range();
+
+        // Given the concerns listed above, the easiest approach to writing a transmission control
+        // loop with deterministic timing is to write an unrolled loop that transmits an octet (8
+        // bits) of data at a time, with only a single jump at the end. That way we can most easily
+        // ensure that the loop takes exactly the right amount of CPU cycles, by ensuring that the
+        // single branch instruction is placed at a 4 byte-aligned address.
+
+        // Note: the following loop performs Manchester encoding as part of the iteration, by taking
+        // each bit to transmit and then XOR'ing it with 1, emitting that value as the first
+        // bit-half and then emitting the original bit value as the second bit-half. This means we
+        // don't have to encode the input data first, before then transmitting the encoded data,
+        // saving on CPU time and avoiding the need for a 2nd buffer to hold the encoded data.
+        unsafe {
+            asm!(
+                // Read the current CSR value.
+                "csrr {csr_base_value}, {csr_cpu_gpio_out}",
+                // Clear the bit corresponding to the CPU output signal we will use.
+                "andi {csr_base_value}, {csr_base_value},~(1 << {cpu_signal_idx})",
+                // Writing {csr_base_value} to the CSR will now preserve the state of all the other
+                // CPU output signals that we aren't using in this function (just in case some other
+                // piece of code is using the dedicated IO feature as well..)
+
+                // This ensures that the label is 4 byte-aligned, and hence that all instructions'
+                // alignments are deterministic, regardless of the changes that might occur around
+                // this code. This is important because the alignment of the `bne` instruction all
+                // the way at the end determines whether it takes 3 or 4 CPU cycles in the final
+                // iteration.
+                ".align 4",
+                // Start of next byte processing logic. There should be exactly 7 CPU cycles up to
+                // and including the `csrw` instruction, so that there's 8 cycles in total when
+                // accounting for the `bne` instruction at the end of the previous iteration.
+                "1:",
+                // Load the next byte into the {data_byte} register.
+                "lbu {data_byte}, 0({data_ptr})", // 1st and 2nd cycle
+                // Process bit 1, starting by extracting the data bit from the LSB.
+                //
+                // Note that the `andi` instruction *must* follow the `lbu` instruction to ensure
+                // that the `lbu` instruction consistently takes 2 cycles each time it is executed.
+                // See the comment in [cycle_counting::_branch_back_usually_taken_w_lbu] for more
+                // info on why this is important.
+                "andi {data_bit}, {data_byte}, 1", // 3rd cycle
+                // XOR with 1 to generate the first half of the Manchester-encoded bit symbol.
+                "xori {tmp}, {data_bit}, 1", // 4th cycle
+                // Shift the XOR'd data bit to the right CPU output signal index.
+                "slli {tmp}, {tmp}, {cpu_signal_idx}", // 5th cycle
+                // Apply it to the base CSR value to produce the target CSR value (writing to our
+                // target bit but leaving the other bits unchanged from the base CSR value).
+                "or {tmp}, {tmp}, {csr_base_value}", // 6th cycle
+                // Emit the first half of the bit symbol. Note that when we execute this instruction
+                // the very first time, the timing doesn't really matter. After that, this
+                // instruction needs to be executed on the 8th cycle since the last `csrw` at the
+                // end of the previous iteration. It's 7 CPU cycles away from the "1:" label, which
+                // means it's 8-9 cycles away from the previous iteration's `csrw`, when we take the
+                // `bne` instruction into account.
+                //
+                // TODO: This means that the timing for the 1st byte (which will be part of the
+                // preamble) will be off by 6.25ns. We should fix that.
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 7th cycle
+                // Now proceed to the second half of the Manchester-encoded bit symbol, by again
+                // shifting the (non-XOR'd) data bit to the right CPU output signal index.
+                "slli {tmp}, {data_bit}, {cpu_signal_idx}", // 1st cycle
+                // Apply it to the CSR value to produce the target CSR value.
+                "or {tmp}, {tmp}, {csr_base_value}", // 2nd cycle
+                "nop", // 3rd cycle
+                "nop", // 4th cycle
+                "nop", // 5th cycle
+                "nop", // 6th cycle
+                "nop", // 7th cycle
+                // Emit the second half of the bit symbol. This must happen in the 8th cycle since
+                // the last `csrw`.
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 8th cycle
+
+                // A macro that shifts the data one to the right and writes the two bit halves
+                // corresponding the LSB to the CPU output signal, taking exactly 8 CPU cycles for
+                // each bit half.
+                ".macro write_single_bit bit_idx",
+                // Shift the data byte by one and extract the new data bit from the LSB.
+                "srl {data_byte}, {data_byte}, 1", // 1st cycle
+                "andi {data_bit}, {data_byte}, 1", // 2nd cycle
+                // XOR with 1 to generate the first half of the bit symbol.
+                "xori {tmp}, {data_bit}, 1", // 3rd cycle
+                // Create the new CSR value.
+                "slli {tmp}, {tmp}, {cpu_signal_idx}", // 4th cycle
+                "or {tmp}, {tmp}, {csr_base_value}", // 5th cycle
+                "nop", // 6th cycle
+                "nop", // 7th cycle
+                // Output the first half of the bit symbol.
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 8th cycle
+                // Now proceed to the second half of the bit symbol, by again shifting the
+                // (non-XOR'd) data bit to the right CPU output signal index.
+                "slli {tmp}, {data_bit}, {cpu_signal_idx}", // 1st cycle
+                // Create the new CSR value.
+                "or {tmp}, {tmp}, {csr_base_value}", // 2nd cycle
+                "nop", // 3rd cycle
+                "nop", // 4th cycle
+                "nop", // 5th cycle
+                "nop", // 6th cycle
+                "nop", // 7th cycle
+                // Output the second half of the bit symbol.
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 8th cycle
+                ".endm",
+
+                // Process bits 2 through 7.
+                "write_single_bit",
+                "write_single_bit",
+                "write_single_bit",
+                "write_single_bit",
+                "write_single_bit",
+                "write_single_bit",
+
+                // Process bit 8.
+                // Shift the data byte by one and extract the new data bit from the LSB.
+                "srl {data_byte}, {data_byte}, 1", // 1st cycle
+                "andi {data_bit}, {data_byte}, 1", // 2nd cycle
+                // XOR with 1 to generate the first half of the bit symbol.
+                "xori {tmp}, {data_bit}, 1", // 3rd cycle
+                // Create the new CSR value.
+                "slli {tmp}, {tmp}, {cpu_signal_idx}", // 4th cycle
+                "or {tmp}, {tmp}, {csr_base_value}", // 5th cycle
+                "nop", // 6th cycle
+                "nop", // 7th cycle
+                // Emit the first half of the bit symbol
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 8th cycle
+                // Now proceed to the second half of the bit symbol, by again shifting the
+                // (non-XOR'd) data bit to the right CPU output signal index.
+                "slli {tmp}, {data_bit}, {cpu_signal_idx}", // 1st cycle
+                // Create the new CSR value.
+                "or {tmp}, {tmp}, {csr_base_value}", // 2nd cycle
+                "nop", // 3rd cycle
+                "nop", // 4th cycle
+                "nop", // 5th cycle
+                // 6th cycle, this is equivalent to `nop`, but is encoded as a 32-bit instruction.
+                // We use it instead of `nop` to ensure that the `bne` instruction below is at a
+                // 4-byte aligned address.
+                "andi zero, zero, 0",
+                // Advance the data pointer by one in anticipation of the branch check below.
+                "addi {data_ptr}, {data_ptr}, 1", // 7th cycle
+                // Output the bit via the CSR.
+                "csrw {csr_cpu_gpio_out}, {tmp}", // 8th cycle
+
+                // Loop back to process the next data byte, if there's any more. The first time we
+                // hit this instruction it'll take 2 cycles, then it'll take 1 cycle for taken
+                // branches in the future, and 3 cycles for the final non-taken branch. Note that
+                // the non-taken branch takes 3 cycles because we've ensured, above, that this
+                // instruction falls on a 4 byte-aligned address.
+                "bne {data_ptr}, {data_end_ptr}, 1b",
+                // If we reach here then we've reached the end of the data transmission and we need
+                // to proceed to the start-of-idle signal. These `nop`` instructions ensure we hold
+                // the line high or low for long a total of at least 8 cycles on behalf of the last
+                // bit sent before we do so.
+                "nop", // 4th cycle
+                "nop", // 5th cycle
+                "nop", // 6th cycle
+                "nop", // 7th cycle
+
+                // Emit a TP_IDL signal by setting the pin high and keeping it high 250ns (40
+                // cycles), then setting it low.
+                "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // 8th cycle
+                // 39 cycles
+                "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
+                "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
+                "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
+                "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
+                // Set the output low.
+                "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // 40th cycle
+                // The specifier of the CSR we have to write to to perform direct IO.
+                csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+                cpu_signal_idx = const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+                // The address of the byte array we're processing. Must be `inout(...)` since we
+                // modify the register during execution.
+                data_ptr = inout(reg) data_ptr_range.start => _,
+                // The end address (exclusive, i.e. the address one past the last valid address).
+                data_end_ptr = in(reg) data_ptr_range.end,
+                // Will hold the byte we're processing.
+                data_byte = out(reg) _,
+                // Will hold the data bit being processed.
+                data_bit = out(reg) _,
+                // Will hold the original CSR value, to which we'll apply the specific GPIO's bit
+                // value.
+                csr_base_value = out(reg) _,
+                // A general scratch register.
+                tmp = out(reg) _,
+            );
+        };
     }
 }
