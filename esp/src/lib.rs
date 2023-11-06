@@ -16,6 +16,8 @@ pub mod eth_phy {
     use core::cell::RefCell;
     use critical_section::Mutex;
     use hal::{clock::Clocks, peripheral::PeripheralRef, prelude::*};
+    use log::warn;
+    use niccle_proc_macros::asm_with_perf_counter;
 
     #[derive(Debug)]
     pub enum Error {
@@ -288,6 +290,11 @@ pub mod eth_phy {
         }
     }
 
+    /// The address of the Machine Performance Counter Event Register.
+    const MPCER: usize = 0x7E0;
+    /// The address of the Machine Performance Counter Mode Register.
+    const MPCMR: usize = 0x7E1;
+
     /// Transmits the given Ethernet packet over the transmission line.
     ///
     /// See [Phy::transmit_packet] for more info.
@@ -330,6 +337,17 @@ pub mod eth_phy {
     fn transmit_packet(data: &[u8], _tx_periph: &mut impl hal::gpio::OutputPin) {
         let data_ptr_range = data.as_ptr_range();
 
+        // Enable performance counting, and set it up to count CPU cycles.
+        unsafe {
+            asm!(
+                "csrw {mpcer}, (1<<0)", // Enable counting of CPU cycles.
+                "csrw {mpcmr}, 0", // Disable the counter.
+                "csrw {mpcmr}, 1", // Enable the counter.
+                mpcer = const(MPCER),
+                mpcmr = const(MPCMR),
+            );
+        }
+
         // Given the concerns listed above, the easiest approach to writing a transmission control
         // loop with deterministic timing is to write an unrolled loop that transmits an octet (8
         // bits) of data at a time, with only a single jump at the end. That way we can most easily
@@ -341,8 +359,8 @@ pub mod eth_phy {
         // bit-half and then emitting the original bit value as the second bit-half. This means we
         // don't have to encode the input data first, before then transmitting the encoded data,
         // saving on CPU time and avoiding the need for a 2nd buffer to hold the encoded data.
-        unsafe {
-            asm!(
+        let cycles_transmitting = unsafe {
+            asm_with_perf_counter!(
                 // Read the current CSR value.
                 "csrr {csr_base_value}, {csr_cpu_gpio_out}",
                 // Clear the bit corresponding to the CPU output signal we will use.
@@ -351,12 +369,11 @@ pub mod eth_phy {
                 // CPU output signals that we aren't using in this function (just in case some other
                 // piece of code is using the dedicated IO feature as well..)
 
-                // This ensures that the label is 4 byte-aligned, and hence that all instructions'
-                // alignments are deterministic, regardless of the changes that might occur around
-                // this code. This is important because the alignment of the `bne` instruction all
-                // the way at the end determines whether it takes 3 or 4 CPU cycles in the final
-                // iteration.
-                ".align 4",
+                // A `nop` to ensure that the "1:" label below is 4 byte-aligned. We know that the
+                // start of this block is 4 byte-aligned (`asm_with_perf_counter` guarantees that),
+                // and that the `andi` instructions is a 16 bit instruction, hence we need to add
+                // this 16-bit `nop`` instruction to ensure proper 4 byte alignment going forward.
+                "nop",
                 // Start of next byte processing logic. There should be exactly 7 CPU cycles up to
                 // and including the `csrw` instruction, so that there's 8 cycles in total when
                 // accounting for the `bne` instruction at the end of the previous iteration.
@@ -510,8 +527,27 @@ pub mod eth_phy {
                 // value.
                 csr_base_value = out(reg) _,
                 // A general scratch register.
-                tmp = out(reg) _,
-            );
+                tmp = out(reg) _
+            )
         };
+        // Cycles spent at the start for `csrr`, `andi`, and `nop` instructions.
+        let mut cycles_expected = 3;
+        // Cycles spent in the very first iteration between the "1:" label and before the first
+        // `csrw`.
+        cycles_expected += 6;
+        // Exactly 8 * 16 CPU cycles spent emitting the real data.
+        cycles_expected += data.len() as u32 * 8 * 16;
+        // Exactly 40 cycles spent emitting the TP_IDL signal.
+        cycles_expected += 40;
+        // Ehe final cycle spent resetting the signal level back to 0 after TP_IDL.
+        cycles_expected += 1;
+        // TODO: This currently always prints a warning, because the first taken backward jump takes
+        // 2 cycles rather than the expect 1 cycle.
+        if cycles_transmitting != cycles_expected {
+            warn!(
+                "transmit_packet loop took {cycles_transmitting} cycles instead of the \
+                {cycles_expected} cycles we expected."
+            );
+        }
     }
 }
