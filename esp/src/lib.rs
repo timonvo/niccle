@@ -369,17 +369,39 @@ pub mod eth_phy {
                 // CPU output signals that we aren't using in this function (just in case some other
                 // piece of code is using the dedicated IO feature as well..)
 
-                // A `nop` to ensure that the "1:" label below is 4 byte-aligned. We know that the
-                // start of this block is 4 byte-aligned (`asm_with_perf_counter` guarantees that),
-                // and that the `andi` instructions is a 16 bit instruction, hence we need to add
-                // this 16-bit `nop`` instruction to ensure proper 4 byte alignment going forward.
-                "nop",
+                // Start by emitting only zeroes in the first iteration. We do this because the
+                // `bne` instruction at the end of the first iteration will take an extra CPU cycles
+                // compared to all subsequent iterations, and we want to ensure that the timing for
+                // each transmitted data byte is perfect. By emitting zeroes in the first iteration
+                // we effectively make it a no-op, meaning that the extra CPU cycle for the backward
+                // jump doesn't matter. timing is perfect.
+                "li {data_byte}, 0",
+                "li {data_bit}, 0",
+                // We make the first iteration emit zeroes by effectively disabling the XOR
+                // operation that is otherwise used to perform the Manchester-encoding of the data.
+                "li {xor_value}, 0",
+                // Subtract the data pointer by one, since we'll run through one iteration without
+                // actually transmitting any data, increment the data pointer, and only the start
+                // transmitting data from the 2nd iteration onwards.
+                "addi {data_ptr}, {data_ptr}, -1",
+                // Jump into the first loop iteration, but skipping the first `lbu` instruction.
+                // That way we a) won't read from a potentially invalid address (due to {data_ptr}
+                // having been decremented just now), and b) we'll simply act as if the very first
+                // data byte is zero.
+                "j 2f",
+
                 // Start of next byte processing logic. There should be exactly 7 CPU cycles up to
                 // and including the `csrw` instruction, so that there's 8 cycles in total when
                 // accounting for the `bne` instruction at the end of the previous iteration.
+                //
+                // Note that we know that this label's address will be 4 byte-aligned, since we know
+                // that the start of this block is 4 byte-aligned (`asm_with_perf_counter`
+                // guarantees that), and that the 6 `andi`/`li`/`addi`/`j`` instructions before this
+                // label are 16 bit instructions, and hence this is still a 4 byte-aligned address.
                 "1:",
                 // Load the next byte into the {data_byte} register.
                 "lbu {data_byte}, 0({data_ptr})", // 1st and 2nd cycle
+                "2:",
                 // Process bit 1, starting by extracting the data bit from the LSB.
                 //
                 // Note that the `andi` instruction *must* follow the `lbu` instruction to ensure
@@ -388,21 +410,25 @@ pub mod eth_phy {
                 // info on why this is important.
                 "andi {data_bit}, {data_byte}, 1", // 3rd cycle
                 // XOR with 1 to generate the first half of the Manchester-encoded bit symbol.
-                "xori {tmp}, {data_bit}, 1", // 4th cycle
+                "xor {tmp}, {data_bit}, {xor_value}", // 4th cycle
                 // Shift the XOR'd data bit to the right CPU output signal index.
                 "slli {tmp}, {tmp}, {cpu_signal_idx}", // 5th cycle
                 // Apply it to the base CSR value to produce the target CSR value (writing to our
                 // target bit but leaving the other bits unchanged from the base CSR value).
                 "or {tmp}, {tmp}, {csr_base_value}", // 6th cycle
                 // Emit the first half of the bit symbol. Note that when we execute this instruction
-                // the very first time, the timing doesn't really matter. After that, this
-                // instruction needs to be executed on the 8th cycle since the last `csrw` at the
-                // end of the previous iteration. It's 7 CPU cycles away from the "1:" label, which
-                // means it's 8-9 cycles away from the previous iteration's `csrw`, when we take the
-                // `bne` instruction into account.
+                // the very first time, the timing doesn't really matter because the first iteration
+                // of the loop will emit only zeroes. After that, the timing of the 2nd iteration
+                // also doesn't matter, since the actual data transmission still won't have started
+                // yet. After that, this instruction needs to be executed on the 8th cycle since the
+                // last `csrw` at the end of the previous iteration. It's 7 CPU cycles away from the
+                // "1:" label, which means it's exactly 8 cycles away from the previous iteration's
+                // `csrw`, when we take the `bne` instruction into account, once we're in the 3rd
+                // iteration of the loop onwards.
                 //
-                // TODO: This means that the timing for the 1st byte (which will be part of the
-                // preamble) will be off by 6.25ns. We should fix that.
+                // Once we hit this instruction for the first real data bit, we must spend exactly
+                // `data.len() * 8 * 16 + 40` CPU cycles between this instruction and the second the
+                // last instruction of this block (the last `nop` holding the TP_IDL signal high).
                 "csrw {csr_cpu_gpio_out}, {tmp}", // 7th cycle
                 // Now proceed to the second half of the Manchester-encoded bit symbol, by again
                 // shifting the (non-XOR'd) data bit to the right CPU output signal index.
@@ -426,7 +452,7 @@ pub mod eth_phy {
                 "srl {data_byte}, {data_byte}, 1", // 1st cycle
                 "andi {data_bit}, {data_byte}, 1", // 2nd cycle
                 // XOR with 1 to generate the first half of the bit symbol.
-                "xori {tmp}, {data_bit}, 1", // 3rd cycle
+                "xor {tmp}, {data_bit}, {xor_value}", // 3rd cycle
                 // Create the new CSR value.
                 "slli {tmp}, {tmp}, {cpu_signal_idx}", // 4th cycle
                 "or {tmp}, {tmp}, {csr_base_value}", // 5th cycle
@@ -461,7 +487,7 @@ pub mod eth_phy {
                 "srl {data_byte}, {data_byte}, 1", // 1st cycle
                 "andi {data_bit}, {data_byte}, 1", // 2nd cycle
                 // XOR with 1 to generate the first half of the bit symbol.
-                "xori {tmp}, {data_bit}, 1", // 3rd cycle
+                "xor {tmp}, {data_bit}, {xor_value}", // 3rd cycle
                 // Create the new CSR value.
                 "slli {tmp}, {tmp}, {cpu_signal_idx}", // 4th cycle
                 "or {tmp}, {tmp}, {csr_base_value}", // 5th cycle
@@ -474,13 +500,20 @@ pub mod eth_phy {
                 "slli {tmp}, {data_bit}, {cpu_signal_idx}", // 1st cycle
                 // Create the new CSR value.
                 "or {tmp}, {tmp}, {csr_base_value}", // 2nd cycle
+                // We've now set everything up to emit the last half of the last bit symbol, but we
+                // still have 5 extra CPU cycles before we should emit it. We'll use those remaining
+                // CPU cycles to prep for the next iteration of the loop.
                 "nop", // 3rd cycle
                 "nop", // 4th cycle
-                "nop", // 5th cycle
-                // 6th cycle, this is equivalent to `nop`, but is encoded as a 32-bit instruction.
+                // 5th cycle, this is equivalent to `nop`, but is encoded as a 32-bit instruction.
                 // We use it instead of `nop` to ensure that the `bne` instruction below is at a
                 // 4-byte aligned address.
                 "andi zero, zero, 0",
+                // Ensure that all subsequent iterations actually perform the necessary XOR
+                // operation to Manchester-encode the data. The very first iteration disables the
+                // XOR operation (by XORing with zero), since the first iteration is intended to
+                // emit a steady stream of zeros.
+                "addi {xor_value}, zero, 1", // 6th cycle
                 // Advance the data pointer by one in anticipation of the branch check below.
                 "addi {data_ptr}, {data_ptr}, 1", // 7th cycle
                 // Output the bit via the CSR.
@@ -490,7 +523,9 @@ pub mod eth_phy {
                 // hit this instruction it'll take 2 cycles, then it'll take 1 cycle for taken
                 // branches in the future, and 3 cycles for the final non-taken branch. Note that
                 // the non-taken branch takes 3 cycles because we've ensured, above, that this
-                // instruction falls on a 4 byte-aligned address.
+                // instruction falls on a 4 byte-aligned address. Also note that the very first
+                // iteration of this loop only emits zeroes, and not any real data, hence we don't
+                // mind that the first branch takes an extra CPU cycle.
                 "bne {data_ptr}, {data_end_ptr}, 1b",
                 // If we reach here then we've reached the end of the data transmission and we need
                 // to proceed to the start-of-idle signal. These `nop`` instructions ensure we hold
@@ -523,6 +558,8 @@ pub mod eth_phy {
                 data_byte = out(reg) _,
                 // Will hold the data bit being processed.
                 data_bit = out(reg) _,
+                // Will hold the complement of the data bit being processed.
+                xor_value = out(reg) _,
                 // Will hold the original CSR value, to which we'll apply the specific GPIO's bit
                 // value.
                 csr_base_value = out(reg) _,
@@ -530,19 +567,19 @@ pub mod eth_phy {
                 tmp = out(reg) _
             )
         };
-        // Cycles spent at the start for `csrr`, `andi`, and `nop` instructions.
-        let mut cycles_expected = 3;
-        // Cycles spent in the very first iteration between the "1:" label and before the first
-        // `csrw`.
+        // Cycles spent at the start for `csrr`, `andi`, `li`, and `addi` instructions.
+        let mut cycles_expected = 6;
+        // Cycles spent in the very first iteration from the `j` instruction and up to but not
+        // including the first `csrw` (the `j` instruction seems to take 2 CPU cycles here).
         cycles_expected += 6;
+        // Exactly 8 * 16 cycles, plus one extra, spent emitting zeroes.
+        cycles_expected += 8 * 16 + 1;
         // Exactly 8 * 16 CPU cycles spent emitting the real data.
         cycles_expected += data.len() as u32 * 8 * 16;
         // Exactly 40 cycles spent emitting the TP_IDL signal.
         cycles_expected += 40;
         // Ehe final cycle spent resetting the signal level back to 0 after TP_IDL.
         cycles_expected += 1;
-        // TODO: This currently always prints a warning, because the first taken backward jump takes
-        // 2 cycles rather than the expect 1 cycle.
         if cycles_transmitting != cycles_expected {
             warn!(
                 "transmit_packet loop took {cycles_transmitting} cycles instead of the \
