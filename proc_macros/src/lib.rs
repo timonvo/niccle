@@ -11,7 +11,7 @@ use quote::quote;
 ///
 /// Performance counting must already have been enabled elsewhere. This macro only manages the
 /// performance counter count register.
-/// 
+///
 /// To use this macro you must also declare `#![feature(asm_const)]` at the top of your source file.
 ///
 /// Note: this macro does not allow a trailing comma after the last argument. This is different from
@@ -20,14 +20,12 @@ use quote::quote;
 /// This has only been tested on ESP32-C3 and ESP32-C6 chips.
 #[proc_macro]
 pub fn asm_with_perf_counter(input: TokenStream) -> TokenStream {
-
     // Note that `parsed` will generally contain both string literal and register definition
     // entries. This means that we can prepend instructions to it, and append register definitions
     // to it, and pass the combination of those to `asm!`, but not the other way around (e.g. we
     // cannot append instructions to it).
     let parsed: proc_macro2::TokenStream = syn::parse(input).unwrap();
-    TokenStream::from(quote! {
-      unsafe {
+    TokenStream::from(quote! {{
         /// The address of the Machine Performance Counter Event Register.
         const MPCER: usize = 0x7E0;
         /// The address of the Machine Performance Counter Count Register.
@@ -73,6 +71,5 @@ pub fn asm_with_perf_counter(input: TokenStream) -> TokenStream {
         );
         let offset = if count_type == 1<<0 || count_type == 1<<1 { 1 } else { 0 };
         cycles_end - cycles_start - offset
-    }
-    })
+    }})
 }

@@ -192,7 +192,8 @@ fn do_bench_single(bench: fn(u32) -> (&'static str, u32, u32), delay: &mut Delay
         log_level,
         "{name:45} {iters:4}x | \
         {cpu_predicted:4} vs {cpu_actual:4} actual \
-        ({instrs_actual:4} INS, {idle_actual:4} IDL, {load_hazards_actual:4} LH, {jump_hazards_actual} JH)"
+        ({instrs_actual:4} INS, {idle_actual:4} IDL, {load_hazards_actual:4} LH, \
+        {jump_hazards_actual} JH)"
     );
 
     // Throttle the benchmarks a bit so that we don't flood the serial display.
@@ -318,18 +319,20 @@ pub mod cycles {
 /// predicted not-taken initially.
 #[ram]
 fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {i}, {i}, 1",
-        "bne {i}, {iters}, 2f",
-        "j 3f",
-        ".align 2",
-        "2: j 1b",
-        ".align 2",
-        "3:",
-        iters = in(reg) iters,
-        i = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "addi {i}, {i}, 1",
+            "bne {i}, {iters}, 2f",
+            "j 3f",
+            ".align 2",
+            "2: j 1b",
+            ".align 2",
+            "3:",
+            iters = in(reg) iters,
+            i = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_TAKEN + cycles::JUMP;
     let predicted = match iters {
@@ -346,19 +349,21 @@ fn branch_fwd_usually_taken(iters: u32) -> (&'static str, u32, u32) {
 /// can't really explain why.
 #[ram]
 fn branch_fwd_usually_taken_w_extra_instr(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {i}, {i}, 1",
-        "bne {i}, {iters}, 2f",
-        "nop",
-        "j 3f",
-        ".align 2",
-        "2: j 1b",
-        ".align 2",
-        "3:",
-        iters = in(reg) iters,
-        i = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "addi {i}, {i}, 1",
+            "bne {i}, {iters}, 2f",
+            "nop",
+            "j 3f",
+            ".align 2",
+            "2: j 1b",
+            ".align 2",
+            "3:",
+            iters = in(reg) iters,
+            i = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::NOP + cycles::JUMP;
     let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_TAKEN_EXTRA_SLOW + cycles::JUMP;
@@ -386,16 +391,18 @@ fn branch_fwd_usually_taken_w_extra_instr(iters: u32) -> (&'static str, u32, u32
 /// jump target for the unconditional jump instruction.
 #[ram]
 fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {y}, {y}, 1",
-        "beq {y}, {iters}, 2f",
-        "j 1b",
-        ".align 2",
-        "2:",
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "addi {y}, {y}, 1",
+            "beq {y}, {iters}, 2f",
+            "j 1b",
+            ".align 2",
+            "2:",
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::ADD + cycles::BRANCH_FWD_TAKEN;
     let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT + cycles::JUMP;
@@ -415,17 +422,19 @@ fn branch_fwd_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 /// cycles in other situations...).
 #[ram]
 fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "nop",
-        "1:", // Not 4 byte-aligned, due to the 16-bit instruction right before this one.
-        "addi {y}, {y}, 1",
-        "beq {y}, {iters}, 2f",
-        "j 1b",
-        ".align 2",
-        "2:",
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "nop",
+            "1:", // Not 4 byte-aligned, due to the 16-bit instruction right before this one.
+            "addi {y}, {y}, 1",
+            "beq {y}, {iters}, 2f",
+            "j 1b",
+            ".align 2",
+            "2:",
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::NOP + cycles::ADD + cycles::BRANCH_FWD_TAKEN;
     let predicted_iter_first = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::JUMP;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_SUBSEQUENT + cycles::JUMP;
@@ -447,22 +456,24 @@ fn branch_fwd_rarely_taken_w_unaligned_jmp_back(iters: u32) -> (&'static str, u3
 /// instructions will be predicted taken initially, and is not something you'd commonly write.
 #[ram]
 fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "j 2f", // 16-bit instruction.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "1:", // Hence, 4 byte-aligned.
-        "j 3f", // 16-bit instruction.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "2:",
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
-        "addi {y}, {y}, 1", // 16-bit instruction.
-        "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
-        "j 2b",  // Also 4 byte-aligned.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "3:", // Hence, 4 byte-aligned.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "j 2f", // 16-bit instruction.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "1:", // Hence, 4 byte-aligned.
+            "j 3f", // 16-bit instruction.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "2:",
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
+            "addi {y}, {y}, 1", // 16-bit instruction.
+            "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+            "j 2b",  // Also 4 byte-aligned.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "3:", // Hence, 4 byte-aligned.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::JUMP_EXTRA_SLOW
         + cycles::NOP
         + cycles::ADD
@@ -484,41 +495,43 @@ fn branch_back_rarely_taken(iters: u32) -> (&'static str, u32, u32) {
 /// cycle each, in the last iteration (rather than, say, the taken branch instruction taken longer).
 #[ram]
 fn branch_back_rarely_taken_w_gpio(iters: u32) -> (&'static str, u32, u32) {
-    // Make sure the pin is set low at the start of the benchmark, without including this instruction
-    // in the cycle count.
+    // Make sure the pin is set low at the start of the benchmark, without including this
+    // instruction in the cycle count.
     unsafe {
         asm!(
         "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
         csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
-    let cycles = asm_with_perf_counter!(
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        "j 4f", // 16-bit instruction.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "1:", // Hence, 4 byte-aligned.
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "j 3f", // 16-bit instruction.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "4:",
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "2:",
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
-        "addi {y}, {y}, 1", // 16-bit instruction.
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "j 2b",  // Also 4 byte-aligned.
-        "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
-        "3:", // Hence, 4 byte-aligned.
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            "j 4f", // 16-bit instruction.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "1:", // Hence, 4 byte-aligned.
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "j 3f", // 16-bit instruction.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "4:",
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "2:",
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned.
+            "addi {y}, {y}, 1", // 16-bit instruction.
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            "beq {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "j 2b",  // Also 4 byte-aligned.
+            "nop", // 16-bit instruction to ensure the next one is 4 byte-aligned. (NEVER EXECUTED)
+            "3:", // Hence, 4 byte-aligned.
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+            cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     // Make sure the pin is set low at the end of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -559,14 +572,16 @@ fn branch_back_rarely_taken_w_gpio(iters: u32) -> (&'static str, u32, u32) {
 /// encounter in real code (e.g. a simple for loop with a counter as the exit condition).
 #[ram]
 fn branch_back_usually_taken_aligned(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:", // This label and the first instruction are two-byte aligned.
-        "addi {y}, {y}, 1", // This is a 16-bit instruction.
-        "nop", // This is a 16-bit instruction, to ensure the next one is 4 byte-aligned.
-        "bne {y}, {iters}, 1b", // Hence, this is a 4 byte-aligned instruction.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:", // This label and the first instruction are two-byte aligned.
+            "addi {y}, {y}, 1", // This is a 16-bit instruction.
+            "nop", // This is a 16-bit instruction, to ensure the next one is 4 byte-aligned.
+            "bne {y}, {iters}, 1b", // Hence, this is a 4 byte-aligned instruction.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest = cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
@@ -584,13 +599,15 @@ fn branch_back_usually_taken_aligned(iters: u32) -> (&'static str, u32, u32) {
 /// longer than aligned unconditional jumps.
 #[ram]
 fn branch_back_usually_taken_unaligned(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:", // This label and the first instruction are two-byte aligned.
-        "addi {y}, {y}, 1", // This is a 16-bit instruction
-        "bne {y}, {iters}, 1b", // Hence this instruction's address is *not* 4-byte-aligned.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:", // This label and the first instruction are two-byte aligned.
+            "addi {y}, {y}, 1", // This is a 16-bit instruction
+            "bne {y}, {iters}, 1b", // Hence this instruction's address is *not* 4-byte-aligned.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     // The branch is extra slow b/c the instruction is not 4 byte-aligned.
     let predicted_iter_last = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN_INSTR_UNALIGNED;
     let predicted_iter_first = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
@@ -611,8 +628,8 @@ fn branch_back_usually_taken_unaligned(iters: u32) -> (&'static str, u32, u32) {
 /// regardless of whether one, two or more iterations are run).
 #[ram]
 fn branch_back_usually_taken_with_gpio_aligned(iters: u32) -> (&'static str, u32, u32) {
-    // Make sure the pin is set low at the start of the benchmark, without including this instruction
-    // in the cycle count.
+    // Make sure the pin is set low at the start of the benchmark, without including this
+    // instruction in the cycle count.
     unsafe {
         asm!(
         "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
@@ -620,19 +637,21 @@ fn branch_back_usually_taken_with_gpio_aligned(iters: u32) -> (&'static str, u32
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
     // Run the benchmark, setting and clearing the pin between each instruction.
-    let cycles = asm_with_perf_counter!(
-        "1:", // 4 byte-aligned.
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        "addi {y}, {y}, 1", // 16-bit instruction
-        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction.
-        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
-        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:", // 4 byte-aligned.
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            "addi {y}, {y}, 1", // 16-bit instruction
+            "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction.
+            "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+            csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+            cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     // Make sure the pin is set low at the end of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -670,8 +689,8 @@ fn branch_back_usually_taken_with_gpio_aligned(iters: u32) -> (&'static str, u32
 /// regardless of whether one, two or more iterations are run).
 #[ram]
 fn branch_back_usually_taken_with_gpio_unaligned(iters: u32) -> (&'static str, u32, u32) {
-    // Make sure the pin is set low at the start of the benchmark, without including this instruction
-    // in the cycle count.
+    // Make sure the pin is set low at the start of the benchmark, without including this
+    // instruction in the cycle count.
     unsafe {
         asm!(
         "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
@@ -679,18 +698,20 @@ fn branch_back_usually_taken_with_gpio_unaligned(iters: u32) -> (&'static str, u
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
     // Run the benchmark, setting and clearing the pin between each instruction.
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        "addi {y}, {y}, 1", // 16-bit instruction
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "bne {y}, {iters}, 1b", // Hence, not 4 byte-aligned. !!!
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
-        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            "addi {y}, {y}, 1", // 16-bit instruction
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "bne {y}, {iters}, 1b", // Hence, not 4 byte-aligned. !!!
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+            csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+            cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     // Make sure the pin is set low at the end of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -727,14 +748,16 @@ fn branch_back_usually_taken_with_gpio_unaligned(iters: u32) -> (&'static str, u
 /// same total number of CPU cycles.
 #[ram]
 fn branch_back_usually_taken_with_final_nop(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {y}, {y}, 1",
-        "bne {y}, {iters}, 1b",
-        "nop", // This nop causes the non-taken branch instruction to take one fewer CPU cycle.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "addi {y}, {y}, 1",
+            "bne {y}, {iters}, 1b",
+            "nop", // This nop causes the non-taken branch instruction to take one fewer CPU cycle.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN + cycles::NOP;
     let predicted_iter_first = cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest = cycles::ADD + cycles::BRANCH_BACK_TAKEN_SUBSEQUENT;
@@ -753,16 +776,18 @@ fn branch_back_usually_taken_with_final_nop(iters: u32) -> (&'static str, u32, u
 /// bail-out break condition.
 #[ram]
 fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "addi {y}, {y}, 1", // 16 bit instruction
-        "beq zero, {tmp}, 2f", // never taken, i.e. dead branch, 32bit instruction
-        "bne {y}, {iters}, 1b", // 32 bit instruction
-        "2:", // Guaranteed to be aligned
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _,
-        tmp = inout(reg) 1 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "addi {y}, {y}, 1", // 16 bit instruction
+            "beq zero, {tmp}, 2f", // never taken, i.e. dead branch, 32bit instruction
+            "bne {y}, {iters}, 1b", // 32 bit instruction
+            "2:", // Guaranteed to be aligned
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _,
+            tmp = inout(reg) 1 => _
+        )
+    };
     let predicted_iter_last =
         cycles::ADD + cycles::BRANCH_FWD_NOT_TAKEN_INITIAL + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first =
@@ -786,17 +811,19 @@ fn branch_back_usually_taken_w_dead_branch_fwd(iters: u32) -> (&'static str, u32
 /// This is meant to gauge the cost of the unconditional jump instructions.
 #[ram]
 fn branch_back_usually_taken_w_aligned_jmp_fwd(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "j 2f",
-        ".align 4",
-        "2:",
-        "addi {y}, {y}, 1", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "j 2f",
+            ".align 4",
+            "2:",
+            "addi {y}, {y}, 1", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last =
         cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first =
@@ -817,17 +844,19 @@ fn branch_back_usually_taken_w_aligned_jmp_fwd(iters: u32) -> (&'static str, u32
 /// doesn't seem to).
 #[ram]
 fn branch_back_usually_taken_w_unaligned_jmp_fwd(iters: u32) -> (&'static str, u32, u32) {
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "j 2f",
-        ".align 4",
-        "nop", // 16-bit instruction
-        "2:", // Guaranteed to be unaligned.
-        "addi {y}, {y}, 1", // 16-bit-instruction
-        "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
-        iters = in(reg) iters,
-        y = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "j 2f",
+            ".align 4",
+            "nop", // 16-bit instruction
+            "2:", // Guaranteed to be unaligned.
+            "addi {y}, {y}, 1", // 16-bit-instruction
+            "bne {y}, {iters}, 1b", // Hence, 4 byte-aligned.
+            iters = in(reg) iters,
+            y = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::JUMP_EXTRA_SLOW + cycles::ADD + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first = cycles::JUMP + cycles::ADD + cycles::BRANCH_BACK_TAKEN_INITIAL;
     let predicted_iter_rest =
@@ -893,20 +922,22 @@ fn _branch_back_usually_taken_w_lbu(
     // Ensure that the data is filled with ones, since we rely on that to end the loop iteration.
     data.fill(1u8);
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        // LBU takes 2 cycles here. However, we must ensure there's actually a data dependency on
-        // the result of the load instruction, otherwise the CPU can just pipeline it, and then it
-        // will often take just a single cycle (or more precisely, it seems to take 1 cycle every 3
-        // out of 4 iterations, and 2 cycles every 4th iteration).
-        "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
-        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = out(reg) _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            // LBU takes 2 cycles here. However, we must ensure there's actually a data dependency
+            // on the result of the load instruction, otherwise the CPU can just pipeline it, and
+            // then it will often take just a single cycle (or more precisely, it seems to take 1
+            // cycle every 3 out of 4 iterations, and 2 cycles every 4th iteration).
+            "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
+            "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = out(reg) _
+        )
+    };
     let predicted_iter_last =
         cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first =
@@ -936,8 +967,8 @@ fn branch_back_usually_taken_w_lbu_align1_w_gpio(iters: u32) -> (&'static str, u
         data_ptr_range = DATA_U8_ALIGN1.data[0..iters as usize].as_ptr_range();
     }
 
-    // Make sure the pin is set low at the start of the benchmark, without including this instruction
-    // in the cycle count.
+    // Make sure the pin is set low at the start of the benchmark, without including this
+    // instruction in the cycle count.
     unsafe {
         asm!(
         "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
@@ -945,27 +976,29 @@ fn branch_back_usually_taken_w_lbu_align1_w_gpio(iters: u32) -> (&'static str, u
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
     // Run the benchmark, setting and clearing the pin between each instruction.
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        // Note that just like in _branch_back_usually_taken_w_lbu, we must use an `add` instruction
-        // to introduce a data dependency. Even more importantly in this benchmark: the `add`
-        // instruction must immediately follow the `lbu` instruction, we must not place the `csrr`
-        // instruction in between them, otherwise the CPU can seemingly make use of the instruction
-        // pipelining, and then the `lbu` instruction only takes a single CPU cycle three out of
-        // four times it's executed.
-        "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
-        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
-        "nop", // 16-bit instructoin
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
-        "bne {data_ptr}, {data_end_ptr}, 1b",  // Hence, 4 byte-aligned.
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
-        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = out(reg) _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            // Note that just like in _branch_back_usually_taken_w_lbu, we must use an `add`
+            // instruction to introduce a data dependency. Even more importantly in this benchmark:
+            // the `add` instruction must immediately follow the `lbu` instruction, we must not
+            // place the `csrr` instruction in between them, otherwise the CPU can seemingly make
+            // use of the instruction pipelining, and then the `lbu` instruction only takes a single
+            // CPU cycle three out of four times it's executed.
+            "lbu {tmp}, 0({data_ptr})", // 32-bit instruction
+            "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            "bne {data_ptr}, {data_end_ptr}, 1b",  // Hence, 4 byte-aligned.
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+            csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+            cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = out(reg) _
+        )
+    };
     // Make sure the pin is set low at the end of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -1055,16 +1088,18 @@ fn _branch_back_usually_taken_w_lw(
     // Ensure that the data is filled with fours, since we rely on that to end the loop iteration.
     data.fill(4u32);
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "lw {tmp}, 0({data_ptr})", // 32-bit instruction
-        "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = out(reg) _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "lw {tmp}, 0({data_ptr})", // 32-bit instruction
+            "add {data_ptr}, {data_ptr}, {tmp}", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = out(reg) _
+        )
+    };
     let predicted_iter_last =
         cycles::LOAD + cycles::ADD + cycles::NOP + cycles::BRANCH_BACK_NOT_TAKEN;
     let predicted_iter_first =
@@ -1130,23 +1165,25 @@ fn _branch_back_usually_taken_w_sb(
     data: &[u8],
 ) -> (&'static str, u32, u32) {
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
-        // results regardless of alignment/location of the data.
-        "xor {tmp}, {tmp}, zero", // 32-bit instruction
-        "sb {tmp}, 0({data_ptr})", // 32-bit instruction
-        // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
-        // predictable.
-        "nop", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
-        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
-        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            // This seems to introduce a data dependency/hazard that ensures more consistent
+            // benchmark results regardless of alignment/location of the data.
+            "xor {tmp}, {tmp}, zero", // 32-bit instruction
+            "sb {tmp}, 0({data_ptr})", // 32-bit instruction
+            // without these nop every fourth `sb` takes more than one cycle and the loop becomes
+            // less predictable.
+            "nop", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
+            "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+            "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::STORE
         + cycles::XOR
         + cycles::NOP
@@ -1191,8 +1228,8 @@ fn branch_back_usually_taken_w_sb_align1_w_gpio(iters: u32) -> (&'static str, u3
         data_ptr_range = DATA_U8_ALIGN1.data[0..iters as usize].as_ptr_range();
     }
 
-    // Make sure the pin is set low at the start of the benchmark, without including this instruction
-    // in the cycle count.
+    // Make sure the pin is set low at the start of the benchmark, without including this
+    // instruction in the cycle count.
     unsafe {
         asm!(
         "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear
@@ -1200,28 +1237,30 @@ fn branch_back_usually_taken_w_sb_align1_w_gpio(iters: u32) -> (&'static str, u3
         cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX))
     };
     // Run the benchmark, setting and clearing the pin between each instruction.
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
-        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
-        // results regardless of alignment/location of the data.
-        "xor {tmp}, {tmp}, zero", // 32-bit instruction
-        "sb {tmp}, 0({data_ptr})", // 32-bit instruction
-        "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instructoin
-        // without these nop every fourth `sb` takes more than one cycle and the loop becomes less
-        // predictable.
-        "nop", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
-        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
-        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
-        "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
-        csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
-        cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set, 32-bit instruction
+            // This seems to introduce a data dependency/hazard that ensures more consistent
+            // benchmark results regardless of alignment/location of the data.
+            "xor {tmp}, {tmp}, zero", // 32-bit instruction
+            "sb {tmp}, 0({data_ptr})", // 32-bit instruction
+            "csrrci zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Clear, 32-bit instruction
+            // without these nop every fourth `sb` takes more than one cycle and the loop becomes
+            // less predictable.
+            "nop", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "addi {data_ptr}, {data_ptr}, 1", // 16-bit instruction
+            "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+            "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{cpu_signal_idx}", // Set
+            csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
+            cpu_signal_idx= const(TX_CPU_OUTPUT_SIGNAL_CSR_IDX),
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = inout(reg) 0 => _
+        )
+    };
     // Make sure the pin is set low at the end of the benchmark, without including this instruction
     // in the cycle count.
     unsafe {
@@ -1317,23 +1356,25 @@ fn _branch_back_usually_taken_w_sw(
     data: &[u32],
 ) -> (&'static str, u32, u32) {
     let data_ptr_range = data[0..iters as usize].as_ptr_range();
-    let cycles = asm_with_perf_counter!(
-        "1:",
-        // This seems to introduce a data dependency/hazard that ensures more consistent benchmark
-        // results regardless of alignment/location of the data.
-        "xor {tmp}, {tmp}, zero", // 32-bit instruction
-        "sw zero, 0({data_ptr})", // 32-bit instruction
-        // without these nop every fourth `sw` takes more than one cycle and the loop becomes less
-        // predictable.
-        "nop", // 16-bit instruction
-        "nop", // 16-bit instruction
-        "addi {data_ptr}, {data_ptr}, 4", // 16-bit instruction
-        "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
-        "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
-        data_ptr = inout(reg) data_ptr_range.start => _,
-        data_end_ptr = in(reg) data_ptr_range.end,
-        tmp = inout(reg) 0 => _
-    );
+    let cycles = unsafe {
+        asm_with_perf_counter!(
+            "1:",
+            // This seems to introduce a data dependency/hazard that ensures more consistent
+            // benchmark results regardless of alignment/location of the data.
+            "xor {tmp}, {tmp}, zero", // 32-bit instruction
+            "sw zero, 0({data_ptr})", // 32-bit instruction
+            // without these nop every fourth `sw` takes more than one cycle and the loop becomes
+            // less predictable.
+            "nop", // 16-bit instruction
+            "nop", // 16-bit instruction
+            "addi {data_ptr}, {data_ptr}, 4", // 16-bit instruction
+            "nop", // 16-bit instruction, to ensure next instruction is 4 byte-aligned.
+            "bne {data_ptr}, {data_end_ptr}, 1b", // Hence, 4 byte-aligned.
+            data_ptr = inout(reg) data_ptr_range.start => _,
+            data_end_ptr = in(reg) data_ptr_range.end,
+            tmp = inout(reg) 0 => _
+        )
+    };
     let predicted_iter_last = cycles::STORE
         + cycles::XOR
         + cycles::NOP
