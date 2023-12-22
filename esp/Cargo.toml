@@ -17,7 +17,13 @@ esp-backtrace = { version = "0.7.0", features = [
   "panic-handler",
   "print-uart",
 ] }
-esp-println = { version = "0.6.0", features = ["log"] }
+# We disable the default "critical-section" feature, since that can create situations where ongoing
+# log calls prevent interrupts from firing.
+esp-println = { version = "0.6.0", default-features = false, features = [
+  "colors",
+  "log",
+  "uart",
+] }
 esp32c3-hal = { version = "0.12.0", optional = true }
 esp32c6-hal = { version = "0.5.0", optional = true }
 log = { workspace = true }
@@ -31,12 +37,23 @@ bench = false
 test = false
 
 [features]
-# Build for esp32c6 by default. Use --no-default-features --feature esp32c3 to build for ESP32-C3.
-default = ["esp32c6"]
+# Build for esp32c6 by default. Use "--no-default-features --feature direct-vectoring,esp32c3" to
+# build for ESP32-C3 (although the code hasn't really been tested on ESP32-C3 and is unlikely to
+# work correctly at this point).
+default = ["direct-vectoring", "esp32c6"]
 esp32c3 = ["esp-backtrace/esp32c3", "esp-println/esp32c3", "esp32c3-hal"]
 esp32c6 = ["esp-backtrace/esp32c6", "esp-println/esp32c6", "esp32c6-hal"]
+# The direct-vectoring feature significantly reduces the delay between an interrupt having fired and
+# the interrupt routine being invoked, at the cost of a bit less flexible code.
+direct-vectoring = [
+  "esp32c3-hal?/direct-vectoring",
+  "esp32c6-hal?/direct-vectoring",
+]
 
 [[example]]
 # This example only supports the ESP32-C6 chip for the time being.
 name = "arp_request"
+# The "direct-vectoring" feature is not listed as required, but without it this binary will not be
+# functional. The only useful thing this binary does in that case is show how slow the interrupt
+# routine invocation latency is.
 required-features = ["esp32c6"]

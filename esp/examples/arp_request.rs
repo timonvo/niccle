@@ -1,5 +1,8 @@
-//! This example binary uses the `niccle_esp::eth_phy` module to transmit a hardcoded ARP request.
-//! It is currently still a work in progress, and is only tested on ESP32-C6 chips.
+//! This example binary uses the `niccle_esp::eth_phy` module to transmit a hardcoded ARP request
+//! and receive any incoming (response) packets. Incoming packets are handled by the
+//! [niccle::eth_mac] crate, which currently validates them and prints some diagnostics.
+//!
+//! It is currently only tested on ESP32-C6 chips.
 
 #![no_std]
 #![no_main]
@@ -18,6 +21,8 @@ use niccle_esp::eth_phy;
 static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
     hal::timer::Timer0<hal::peripherals::TIMG0>,
     hal::gpio::Gpio5<hal::gpio::Unknown>,
+    hal::gpio::Gpio6<hal::gpio::Unknown>,
+    hal::gpio::Gpio10<hal::gpio::Unknown>,
 > = eth_phy::InterruptHandler::new();
 
 #[entry]
@@ -39,25 +44,24 @@ fn main() -> ! {
     );
 
     // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER we
-    // defined above, and making it use GPIO5 for TX.
+    // defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the RX debug
+    // output signal.
     let mut eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
         clocks: &clocks,
         interrupt_handler: &ETH_INTERRUPT_HANDLER,
         timer: timg0.timer0,
         tx_pin: io.pins.gpio5.into_ref(),
+        rx_pin: io.pins.gpio6.into_ref(),
+        // Note that we invert the RX input signal, because we assume that the electrical circuit
+        // used leaves the signal high when idle. See
+        // https://ctrlsrc.io/posts/2023/niccle-ethernet-circuit-design/#inverted-rx-signals for why
+        // this is the case.
+        rx_invert_signal: true,
+        rx_debug_pin: io.pins.gpio10.into_ref(),
     })
     .unwrap();
 
-    // Enable the interrupt routine (see TG0_T0_LEVEL below) for the timer.
-    hal::interrupt::enable(
-        hal::peripherals::Interrupt::TG0_T0_LEVEL,
-        hal::interrupt::Priority::Priority1,
-    )
-    .unwrap();
-    // Enable global interrupts.
-    unsafe {
-        hal::riscv::interrupt::enable();
-    }
+    configure_interrupts();
 
     let mut delay = Delay::new(&clocks);
 
@@ -88,18 +92,110 @@ fn main() -> ! {
     niccle::debug_util::log_data_binary_hex(log::Level::Info, &packet);
 
     loop {
-        info!("LTPs sent: {}", eth_phy.stats().ltps_sent);
+        // Print some stats about our progress so far.
+        let stats = eth_phy.stats();
+        info!("----------");
+        info!("LTPs sent: {}", stats.tx.ltps_sent);
+        info!("LTPs received: {}", stats.rx.ltps_received);
+        info!("Packets sent: {}", stats.tx.packets_sent);
+        info!(
+            "Probable packets received: {}",
+            stats.rx.probable_packets_received
+        );
+        info!(
+            "Truncated (invalid) packets received: {}",
+            stats.rx.truncated_packets_received
+        );
 
         // Transmit the packet (note that the Phy will Manchester-encode it as it is transmitted).
         eth_phy.transmit_packet(&packet);
-        info!("Packets sent: {}", eth_phy.stats().packets_sent);
 
         delay.delay_ms(2000u32);
     }
 }
 
+#[cfg(not(feature = "direct-vectoring"))]
+fn configure_interrupts() {
+    // Note that without the "direct-vectoring" feature this example binary doesn't actually work
+    // correctly. See the note on the `GPIO`` interrupt function below for more info.
+    hal::interrupt::enable(
+        hal::peripherals::Interrupt::TG0_T0_LEVEL,
+        hal::interrupt::Priority::Priority1,
+    )
+    .unwrap();
+    hal::interrupt::enable(
+        hal::peripherals::Interrupt::GPIO,
+        hal::interrupt::Priority::Priority1,
+    )
+    .unwrap();
+    unsafe {
+        // Enable global interrupts.
+        hal::riscv::interrupt::enable();
+    }
+}
+
+#[cfg(feature = "direct-vectoring")]
+fn configure_interrupts() {
+    unsafe {
+        // Enable the interrupt routines for the timer and incoming packets (see cpu_int_30_handler
+        // and cpu_int_31_handler below).
+        {
+            hal::interrupt::enable(
+                hal::peripherals::Interrupt::TG0_T0_LEVEL,
+                hal::interrupt::Priority::Priority1,
+                hal::interrupt::CpuInterrupt::Interrupt30,
+            )
+            .unwrap();
+            hal::interrupt::enable(
+                hal::peripherals::Interrupt::GPIO,
+                hal::interrupt::Priority::Priority1,
+                hal::interrupt::CpuInterrupt::Interrupt31,
+            )
+            .unwrap();
+        }
+        // Enable global interrupts.
+        hal::riscv::interrupt::enable();
+    }
+}
+
 // This interrupt will fire every 16ms. We need to forward the interrupt calls to the handler.
+#[cfg(not(feature = "direct-vectoring"))]
 #[interrupt]
 fn TG0_T0_LEVEL() {
     ETH_INTERRUPT_HANDLER.on_timer_interrupt();
+}
+
+// This interrupt will fire every 16ms. We need to forward the interrupt calls to the handler.
+#[cfg(feature = "direct-vectoring")]
+#[no_mangle]
+#[ram]
+fn cpu_int_30_handler() {
+    ETH_INTERRUPT_HANDLER.on_timer_interrupt();
+}
+
+// This interrupt will fire when a falling edge is detected on the GPIO RX pin.
+//
+// Without the "direct-vectoring" feature, it takes on the order of 7500ns from when the first
+// signal edge arrives to invoke this interrupt routine. This is too late, as by then all 6400ns of
+// preamble signal will have already passed by, and the interrupt handler won't be able to observe
+// any of it. Hence, this configuration isn't actually functional.
+//
+// This code is left in place merely to facilitate comparing the latency of the interrupt
+// dispatching implementations.
+#[cfg(not(feature = "direct-vectoring"))]
+#[interrupt]
+fn GPIO() {
+    ETH_INTERRUPT_HANDLER.on_rx_interrupt();
+}
+
+// This interrupt will fire when a falling edge is detected on the GPIO RX pin.
+//
+// With the "direct-vectoring" feature, it takes on the order of 844ns from when the first signal
+// edge arrives to invoke this interrupt routine. This leave more than 5500ns of the preamble signal
+// to be observed by the interrupt handler.
+#[cfg(feature = "direct-vectoring")]
+#[no_mangle]
+#[ram]
+fn cpu_int_31_handler() {
+    ETH_INTERRUPT_HANDLER.on_rx_interrupt();
 }
