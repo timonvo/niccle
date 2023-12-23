@@ -18,3 +18,10 @@ license = "Apache-2.0"
 # We don't have any tests or benchmarks yet, and this silences the 'can't find crate for `test`'
 # warning from `cargo fix --all-targets` in that case.
 bench = false
+
+[workspace.dependencies]
+log = { version = "0.4.18" }
+
+[dependencies]
+bitvec = { version = "1.0.1", default-features = false }
+log = { workspace = true }

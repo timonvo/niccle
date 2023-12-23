@@ -82,12 +82,10 @@ fn main() -> ! {
         .copy_from_slice(niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW);
 
     // Print the packet contents to see what we're about to send out on the wire. Note that this is
-    // still the unencoded representation of the data.
-    info!("Packet contents:");
-    info!("----------------");
-    for (i, val) in packet.iter().enumerate() {
-        info!("{i:08}: {val:08b}")
-    }
+    // still the unencoded representation of the data, but that it does include the preamble and SFD
+    // already.
+    info!("------ Outgoing packet contents, in network bit order:");
+    niccle::debug_util::log_data_binary_hex(log::Level::Info, &packet);
 
     loop {
         info!("LTPs sent: {}", eth_phy.stats().ltps_sent);
