@@ -170,6 +170,7 @@ impl<PTimer: hal::timer::Instance, PTx: hal::gpio::OutputPin> InterruptHandler<P
     ///
     /// Panics if not called on an [InterruptHandler] instance in the
     /// [InterruptHandlerState::Attached] state.
+    #[ram]
     fn use_attached_resources<F, T>(&'static self, mut callback: F) -> T
     where
         F: FnMut(&mut InterruptSharedResources<PTimer, PTx>) -> T,
@@ -183,6 +184,7 @@ impl<PTimer: hal::timer::Instance, PTx: hal::gpio::OutputPin> InterruptHandler<P
     }
 
     /// Callback to be invoked from the timer interrupt handler when timer interrupt fires.
+    #[ram]
     pub fn on_timer_interrupt(&'static self) {
         self.use_attached_resources(|resources| {
             eth_phy_dedicated_io::transmit_ltp(&mut *resources.tx_pin);
