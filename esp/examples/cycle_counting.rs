@@ -301,7 +301,7 @@ pub mod cycles {
 
     /// The `beq`, `bne`, and similar instructions with a backward target label. On ESP32-C6 when a
     /// backward non-taken branch is encountered it takes three cycles in some cases, or four cycles
-    /// in other cases ([BRANCH_BACK_NOT_TAKEN_EXTRA_SLOW]). This is longer than a non-taken branch,
+    /// in other cases ([BRANCH_BACK_NOT_TAKEN_INSTR_UNALIGNED]). This is longer than a non-taken branch,
     /// probably because they are expected to be taken in the usual case, as per the RISC-V spec.
     /// One ESP32-C3 backward non-taken branches take a single cycle, just like non-taken forward
     /// branches.
@@ -594,7 +594,7 @@ fn branch_back_usually_taken_aligned(iters: u32) -> (&'static str, u32, u32) {
     ("BNE BACK usually taken aligned", predicted, cycles)
 }
 
-/// Like [branch_back_usually_taken] but with an unaligned jump target. This seems to have the same
+/// Like [branch_back_usually_taken_aligned] but with an unaligned jump target. This seems to have the same
 /// behavior, but it's good to verify since I previously saw unaligned unconditional jumps take
 /// longer than aligned unconditional jumps.
 #[ram]
@@ -743,7 +743,7 @@ fn branch_back_usually_taken_with_gpio_unaligned(iters: u32) -> (&'static str, u
     )
 }
 
-/// Like [branch_back_usually_taken] but with a final nop at the end. In this case the branch
+/// Like [branch_back_usually_taken_aligned] but with a final nop at the end. In this case the branch
 /// instruction one less CPU cycle, but the nop takes one additional CPU cycle, resulting in the
 /// same total number of CPU cycles.
 #[ram]

@@ -31,4 +31,6 @@ cargo clippy -p niccle_esp --all-targets \
     --no-default-features --features esp32c3  \
     -- -Dwarnings
 
+./docs.sh
+
 echo "SUCCESS!"

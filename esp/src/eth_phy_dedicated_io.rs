@@ -14,18 +14,22 @@ use niccle_proc_macros::asm_with_perf_counter;
 /// For now the implementation is hardcoded to always use CPU output signal 0 when using dedicated
 /// IO on the TX pin. In the future we could try to make this more flexible, e.g. using an argument,
 /// or perhaps even a const generic parameter with a const expression bound.
-#[cfg(feature = "esp32c3")]
-pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = hal::gpio::OutputSignal::CPU_GPIO_0;
-#[cfg(feature = "esp32c6")]
-pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = hal::gpio::OutputSignal::CPU_GPIO_OUT0;
+pub const TX_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = {
+    #[cfg(feature = "esp32c3")]
+    let signal = hal::gpio::OutputSignal::CPU_GPIO_0;
+    #[cfg(feature = "esp32c6")]
+    let signal = hal::gpio::OutputSignal::CPU_GPIO_OUT0;
+    signal
+};
 /// The dedicated IO output signal index to use (from 0 to 7, where 0 corresponds to CPU_GPIO_OUT0).
 /// Based on whatever [TX_CPU_OUTPUT_SIGNAL] is set to.
-#[cfg(feature = "esp32c3")]
-const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize =
-    (TX_CPU_OUTPUT_SIGNAL as isize) - hal::gpio::OutputSignal::CPU_GPIO_0 as isize;
-#[cfg(feature = "esp32c6")]
-const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize =
-    (TX_CPU_OUTPUT_SIGNAL as isize) - hal::gpio::OutputSignal::CPU_GPIO_OUT0 as isize;
+const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize = {
+    #[cfg(feature = "esp32c3")]
+    let signal0 = hal::gpio::OutputSignal::CPU_GPIO_0;
+    #[cfg(feature = "esp32c6")]
+    let signal0 = hal::gpio::OutputSignal::CPU_GPIO_OUT0;
+    TX_CPU_OUTPUT_SIGNAL as isize - signal0 as isize
+};
 
 /// This CSR isn't defined by the esp-rs/esp-hal framework yet (nor by the espressif/svd files), so
 /// we hardcode their addresses. See the "1.14 Dedicated IO" chapter of the technical reference
@@ -63,7 +67,7 @@ const MPCMR: usize = 0x7E1;
 
 /// Transmits the given Ethernet packet over the transmission line.
 ///
-/// See [Phy::transmit_packet] for more info.
+/// See [super::eth_phy::Phy::transmit_packet] for more info.
 ///
 /// # A note on writing precisely timed assembly code
 ///
@@ -78,7 +82,7 @@ const MPCMR: usize = 0x7E1;
 /// instructions take just a single cycle to execute, but some can take more, and the behavior is
 /// chip dependent and situation dependent. The `cycle_counting` example binary contains a lot more
 /// useful information on this topic, as does the discussion at
-/// https://ctrlsrc.io/posts/2023/counting-cpu-cycles-on-esp32c3-esp32c6/.
+/// <https://ctrlsrc.io/posts/2023/counting-cpu-cycles-on-esp32c3-esp32c6/>.
 ///
 /// For this particular function, the following insights gained from the `cycle_counting` example
 /// binary are most relevant (focusing on the behavior on ESP32-C6 for now):
@@ -93,9 +97,10 @@ const MPCMR: usize = 0x7E1;
 ///   iteration), and 1 CPU cycle when taken after having been taken before already (in the second
 ///   to second-to-last iterations).
 ///
-/// See the [cycle_counting::branch_back_usually_taken] and
-/// [cycle_counter::_branch_back_usually_taken_w_lbu] for the benchmarks showing this behavior for
-/// the ESP32-C6 CPU.
+/// See
+/// `cycle_counting::branch_back_usually_taken_aligned`
+/// and `cycle_counting::_branch_back_usually_taken_w_lbu` for the benchmarks showing this behavior
+/// for the ESP32-C6 CPU.
 ///
 /// Note: the use of #[ram] is also important, as it it ensures that there won't be any instruction
 /// execution delays, and each instruction will take 6.25ns.
