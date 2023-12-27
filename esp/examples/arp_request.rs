@@ -28,7 +28,7 @@ static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
-    let mut system = peripherals.PCR.split();
+    let system = peripherals.SYSTEM.split();
     // Use the maximum available clock speed, since we want to maximize the GPIO speed we can
     // achieve.
     let clocks = ClockControl::max(system.clock_control).freeze();
@@ -37,11 +37,7 @@ fn main() -> ! {
     info!("Booted up!");
 
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
-    let timg0 = TimerGroup::new(
-        peripherals.TIMG0,
-        &clocks,
-        &mut system.peripheral_clock_control,
-    );
+    let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
 
     // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER we
     // defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the RX debug
@@ -128,10 +124,6 @@ fn configure_interrupts() {
         hal::interrupt::Priority::Priority1,
     )
     .unwrap();
-    unsafe {
-        // Enable global interrupts.
-        hal::riscv::interrupt::enable();
-    }
 }
 
 #[cfg(feature = "direct-vectoring")]
@@ -153,8 +145,6 @@ fn configure_interrupts() {
             )
             .unwrap();
         }
-        // Enable global interrupts.
-        hal::riscv::interrupt::enable();
     }
 }
 
@@ -175,7 +165,7 @@ fn cpu_int_30_handler() {
 
 // This interrupt will fire when a falling edge is detected on the GPIO RX pin.
 //
-// Without the "direct-vectoring" feature, it takes on the order of 7500ns from when the first
+// Without the "direct-vectoring" feature, it takes on the order of 7100ns from when the first
 // signal edge arrives to invoke this interrupt routine. This is too late, as by then all 6400ns of
 // preamble signal will have already passed by, and the interrupt handler won't be able to observe
 // any of it. Hence, this configuration isn't actually functional.
@@ -190,9 +180,9 @@ fn GPIO() {
 
 // This interrupt will fire when a falling edge is detected on the GPIO RX pin.
 //
-// With the "direct-vectoring" feature, it takes on the order of 844ns from when the first signal
-// edge arrives to invoke this interrupt routine. This leave more than 5500ns of the preamble signal
-// to be observed by the interrupt handler.
+// With the "direct-vectoring" feature, it takes on the order of 750ns from when the first signal
+// edge arrives to invoke this interrupt routine. This leave almost 5600ns of the preamble signal to
+// be observed by the interrupt handler.
 #[cfg(feature = "direct-vectoring")]
 #[no_mangle]
 #[ram]

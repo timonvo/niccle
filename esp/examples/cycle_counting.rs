@@ -75,10 +75,7 @@ const TX_CPU_OUTPUT_SIGNAL_CSR_IDX: isize =
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
-    #[cfg(feature = "esp32c3")]
     let system = peripherals.SYSTEM.split();
-    #[cfg(feature = "esp32c6")]
-    let system = peripherals.PCR.split();
     let clocks = ClockControl::max(system.clock_control).freeze();
     esp_println::logger::init_logger_from_env();
     info!("Booted up!");

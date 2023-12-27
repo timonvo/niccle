@@ -34,10 +34,7 @@ const CSR_CPU_GPIO_OUT: u32 = 0x805;
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
-    #[cfg(feature = "esp32c3")]
     let system = peripherals.SYSTEM.split();
-    #[cfg(feature = "esp32c6")]
-    let system = peripherals.PCR.split();
     // Use the maximum available clock speed, since we want to maximize the GPIO speed we can
     // achieve.
     let clocks = ClockControl::max(system.clock_control).freeze();

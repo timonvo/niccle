@@ -20,7 +20,7 @@ license = "Apache-2.0"
 bench = false
 
 [workspace.dependencies]
-log = { version = "0.4.18" }
+log = { version = "0.4.20" }
 
 [dependencies]
 bitvec = { version = "1.0.1", default-features = false }

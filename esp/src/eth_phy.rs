@@ -270,7 +270,7 @@ impl<
     ///
     /// Note: you must use the "direct-vectoring" feature of the ESP crate in order to ensure that
     /// the RX interrupt routine is invoked fast enough (I measured it being invoked within about
-    /// 844ns of the first incoming signal edge). Without it, it takes too long for the
+    /// 750ns of the first incoming signal edge). Without it, it takes too long for the
     /// `#[interrupt]` function to be invoked, which means that by the time this method is invoked
     /// the packet's preamble will already have passed by.
     ///
