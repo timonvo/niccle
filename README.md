@@ -1,7 +1,7 @@
 # Niccle, a bit-banged Ethernet implementation in Rust.
 
-This is a hobby project. See https://ctrlsrc.io/posts/2023/niccle-project-intro/ for more info.
-Currently this project targets only the ESP32-C6 chip.
+This is a hobby project. See https://ctrlsrc.io/posts/2023/niccle-project-intro/
+for more info. Currently this project targets only the ESP32-C6 chip.
 
 ## Code structure
 
@@ -37,11 +37,11 @@ from within the `esp` directory.
 
 ## Running on ESP32-C3
 
-Some but not all of the code (e.g. the
-[cycle_counting](esp/examples/cycle_counting.rs) example) can compile and run on
-ESP32-C3 as well. To target that chip, use the following command:
+Currently only the [cycle_counting](esp/examples/cycle_counting.rs) example can
+compile and run on ESP32-C3 as well. To target that chip, use the following
+command:
 
 ```sh
 cargo run --release --target riscv32imc-unknown-none-elf --no-default-features --feature esp32c3 \
-   --example {some_example}
+   --example cycle_counting
 ```

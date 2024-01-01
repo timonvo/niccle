@@ -11,7 +11,7 @@ version = "0.1.0"
 default-target = "riscv32imac-unknown-none-elf"
 
 [dependencies]
-critical-section = "1.1.2"
+critical-section = { workspace = true }
 esp-backtrace = { version = "0.9.0", features = [
   "exception-handler",
   "panic-handler",
@@ -27,7 +27,11 @@ esp-println = { version = "0.8.0", default-features = false, features = [
 esp32c3-hal = { version = "0.14.0", optional = true }
 esp32c6-hal = { version = "0.7.0", optional = true }
 log = { workspace = true }
-niccle = { path = "../" }
+# This is an optional (but enabled-by-default) dependency, because it isn't compatible with the
+# ESP32-C3 chip (since it needs support for atomic instructions, which C3 chips don't have), and we
+# need to be able to build the `cycle_counting` example binary (which doesn't depend on `niccle` for
+# that chip).
+niccle = { path = "../", optional = true }
 niccle_proc_macros = { path = "../proc_macros" }
 
 [lib]
@@ -37,10 +41,9 @@ bench = false
 test = false
 
 [features]
-# Build for esp32c6 by default. Use "--no-default-features --feature direct-vectoring,esp32c3" to
-# build for ESP32-C3 (although the code hasn't really been tested on ESP32-C3 and is unlikely to
-# work correctly at this point).
-default = ["direct-vectoring", "esp32c6"]
+# Build for esp32c6 by default. Use "--no-default-features --feature esp32c3" to build for ESP32-C3
+# (although only the `cycle_counting` binary is able to build with that configuration).
+default = ["direct-vectoring", "esp32c6", "niccle"]
 esp32c3 = ["esp-backtrace/esp32c3", "esp-println/esp32c3", "esp32c3-hal"]
 esp32c6 = ["esp-backtrace/esp32c6", "esp-println/esp32c6", "esp32c6-hal"]
 # The direct-vectoring feature significantly reduces the delay between an interrupt having fired and
@@ -56,4 +59,9 @@ name = "arp_request"
 # The "direct-vectoring" feature is not listed as required, but without it this binary will not be
 # functional. The only useful thing this binary does in that case is show how slow the interrupt
 # routine invocation latency is.
+required-features = ["esp32c6"]
+
+[[example]]
+# This example only supports the ESP32-C6 chip for the time being.
+name = "simple_signal_integrity_check"
 required-features = ["esp32c6"]

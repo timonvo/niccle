@@ -36,6 +36,8 @@ pub struct PhyConfig<'a, PTimer: 'static, PTx: 'static, PRx: 'static, PRxDebug: 
     pub rx_pin: PeripheralRef<'static, PRx>,
     /// Indicates whether the RX input signal should be inverted.
     pub rx_invert_signal: bool,
+    /// The callback through which to pass received packets to the MAC layer for further processing.
+    pub rx_mac_callback: &'static (dyn eth_mac::PhyRxCallback + Sync),
     /// The GPIO pin to use as the RX debug output pin, for monitoring the behavior and timing of
     /// the receive loop.
     // TODO: Make the use of this pin optional.
@@ -113,6 +115,7 @@ impl<
             timer: config.timer,
             tx_pin: config.tx_pin,
             rx_pin: config.rx_pin,
+            rx_mac_callback: config.rx_mac_callback,
             rx_debug_pin: config.rx_debug_pin,
             stats: Default::default(),
         })?;
@@ -126,7 +129,16 @@ impl<
         self.interrupt_handler
             .use_attached_resources(|resources, _| resources.stats)
     }
+}
 
+impl<
+        'a,
+        PTimer: hal::timer::Instance,
+        PTx: hal::gpio::OutputPin,
+        PRx: hal::gpio::InputPin,
+        PRxDebug: hal::gpio::OutputPin,
+    > eth_mac::PhyTx<'a> for Phy<PTimer, PTx, PRx, PRxDebug>
+{
     /// Transmits the given Ethernet packet over the transmission line.
     ///
     /// Note that the packet must consist of the (unencoded) preamble, SFD and Ethernet frame data.
@@ -143,7 +155,7 @@ impl<
     /// This method currently disables all interrupts during transmission (which means that any
     /// incoming packets will not trigger [InterruptHandler::on_rx_interrupt], and hence will be
     /// dropped), but that may be improved in the future.
-    pub fn transmit_packet(&self, data: &[u8]) {
+    fn transmit_packet(&self, data: &[u8]) {
         self.interrupt_handler
             .use_attached_resources(|resources, _| {
                 // Disable the LTP timer, since we we're about to transmit data and so no LTP will
@@ -301,7 +313,7 @@ impl<
                     resources.stats.rx.probable_packets_received += 1;
 
                     // Pass the received packet to the MAC layer for further processing.
-                    eth_mac::on_rx_packet_received(data);
+                    resources.rx_mac_callback.on_packet_received(data);
                 }
                 eth_phy_dedicated_io::ReceivedTransmission::LinkTestPulse => {
                     resources.stats.rx.ltps_received += 1;
@@ -331,6 +343,8 @@ struct InterruptSharedResources<PTimer: 'static, PTx: 'static, PRx: 'static, PRx
     /// The RX pin used by the interrupt handler to receive data. The pin is only used by the
     /// interrupt handler, but must be passed in at configuration time and hence is shared state.
     rx_pin: PeripheralRef<'static, PRx>,
+    /// The callback through which to pass received packets to the MAC layer for further processing.
+    rx_mac_callback: &'static (dyn eth_mac::PhyRxCallback + Sync),
     /// The pin used to output debug signals on for use in monitoring the receive loop behavior and
     /// timing.
     rx_debug_pin: PeripheralRef<'static, PRxDebug>,

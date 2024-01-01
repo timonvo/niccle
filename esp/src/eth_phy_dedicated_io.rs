@@ -8,7 +8,7 @@ use esp32c6_hal as hal;
 
 use core::arch::asm;
 use hal::prelude::*;
-use log::{debug, trace, warn};
+use log::{trace, warn};
 use niccle::eth_mac;
 use niccle_proc_macros::asm_with_perf_counter;
 
@@ -120,7 +120,7 @@ pub fn transmit_ltp(_tx_periph: &mut impl hal::gpio::OutputPin) {
 
 /// Transmits the given Ethernet packet over the transmission line.
 ///
-/// See [super::eth_phy::Phy::transmit_packet] for more info.
+/// See [super::eth_phy::PhyTx::transmit_packet](super::eth_phy::Phy) for more info.
 ///
 /// # A note on writing precisely timed assembly code
 ///
@@ -993,7 +993,7 @@ pub fn receive_packet<'a>(
     } else {
         result_size
     };
-    debug!(
+    trace!(
         "PHY Packet received: code {result_code}, size {result_size}, decoded_byte \
         {decoded_byte:08b}, CPU cycles spent: {cycles_receiving}"
     );

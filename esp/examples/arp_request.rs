@@ -15,7 +15,8 @@ use hal::{
     clock::ClockControl, peripheral::Peripheral, peripherals::Peripherals, prelude::*,
     timer::TimerGroup, Delay, IO,
 };
-use log::info;
+use log::{debug, info};
+use niccle::{debug_util::FormatEthernetFrame, eth_mac};
 use niccle_esp::eth_phy;
 
 static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
@@ -24,6 +25,10 @@ static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
     hal::gpio::Gpio6<hal::gpio::Unknown>,
     hal::gpio::Gpio10<hal::gpio::Unknown>,
 > = eth_phy::InterruptHandler::new();
+
+const MAC_RX_BUFFER_CAPACITY: usize = 10;
+static ETH_MAC_RX: eth_mac::MacRx<MAC_RX_BUFFER_CAPACITY> =
+    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new();
 
 #[entry]
 fn main() -> ! {
@@ -39,9 +44,9 @@ fn main() -> ! {
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
     let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
 
-    // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER we
-    // defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the RX debug
-    // output signal.
+    // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER and
+    // ETH_MAC_RX we defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the
+    // RX debug output signal.
     let eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
         clocks: &clocks,
         interrupt_handler: &ETH_INTERRUPT_HANDLER,
@@ -53,9 +58,13 @@ fn main() -> ! {
         // https://ctrlsrc.io/posts/2023/niccle-ethernet-circuit-design/#inverted-rx-signals for why
         // this is the case.
         rx_invert_signal: true,
+        rx_mac_callback: &ETH_MAC_RX,
         rx_debug_pin: io.pins.gpio10.into_ref(),
     })
     .unwrap();
+
+    // Create a MAC TX instance that uses the Phy instance we configured above.
+    let mut eth_mac_tx = eth_mac::MacTx::new(&eth_phy);
 
     configure_interrupts();
 
@@ -68,45 +77,51 @@ fn main() -> ! {
     // least 12 LTPs to have been sent.
     delay.delay_ms(200u32);
 
-    // Construct the packet by prepending the preamble and SFD to the frame data.
-    const PREAMBLE_W_SFD: [u8; 8] = [
-        // Preamble
-        0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101, 0b01010101,
-        // SFD
-        0b11010101,
-    ];
-    let mut packet =
-        [0u8; (PREAMBLE_W_SFD.len() + niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW.len())];
-    packet[0..PREAMBLE_W_SFD.len()].copy_from_slice(&PREAMBLE_W_SFD);
-    packet[PREAMBLE_W_SFD.len()..]
-        .copy_from_slice(niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW);
+    let test_frame = &niccle::example_data::TEST_FRAME_ARP_REQUEST_RAW;
 
     // Print the packet contents to see what we're about to send out on the wire. Note that this is
     // still the unencoded representation of the data, but that it does include the preamble and SFD
     // already.
-    info!("------ Outgoing packet contents, in network bit order:");
-    niccle::debug_util::log_data_binary_hex(log::Level::Info, &packet);
+    info!("------ Outgoing frame contents, in network bit order:");
+    niccle::debug_util::log_data_binary_hex(log::Level::Info, test_frame);
 
     loop {
         // Print some stats about our progress so far.
-        let stats = eth_phy.stats();
-        info!("----------");
-        info!("LTPs sent: {}", stats.tx.ltps_sent);
-        info!("LTPs received: {}", stats.rx.ltps_received);
-        info!("Packets sent: {}", stats.tx.packets_sent);
+        let phy_stats = eth_phy.stats();
+        let mac_rx_stats = ETH_MAC_RX.stats();
+        info!("--- Stats ---");
         info!(
-            "Probable packets received: {}",
-            stats.rx.probable_packets_received
+            "PHY TX: Packets:  {:5},              {:4}  LTPs:        {:7}",
+            phy_stats.tx.packets_sent, "", phy_stats.tx.ltps_sent,
         );
         info!(
-            "Truncated (invalid) packets received: {}",
-            stats.rx.truncated_packets_received
+            "PHY RX: Packets:  {:5}, trunc:       {:4}, LTPs:        {:7}",
+            phy_stats.rx.probable_packets_received,
+            phy_stats.rx.truncated_packets_received,
+            phy_stats.rx.ltps_received,
         );
 
-        // Transmit the packet (note that the Phy will Manchester-encode it as it is transmitted).
-        eth_phy.transmit_packet(&packet);
+        info!(
+            "MAC RX: Packets:  {:5}, invalid SFD: {:4}, invalid CRC: {:7}",
+            mac_rx_stats.valid_frames_received,
+            mac_rx_stats.invalid_sfd_packets_received,
+            mac_rx_stats.invalid_crc_packets_received,
+        );
+        info!(
+            "        Consumed: {:5}, dropped:     {:4}",
+            mac_rx_stats.valid_frames_consumed, mac_rx_stats.valid_frames_dropped
+        );
+
+        // Transmit the packet (note that the MacTx will pad the frame and calculate its FCS, while
+        // the Phy will Manchester-encode it as it is transmitted).
+        eth_mac_tx.transmit_frame(test_frame);
 
         delay.delay_ms(2000u32);
+
+        // Consume any frames that may have arrived since we last checked from the MacRx buffer.
+        while let Some(frame) = ETH_MAC_RX.receive() {
+            debug!("<<< Consumed RX {}", FormatEthernetFrame(frame.live_data()));
+        }
     }
 }
 
