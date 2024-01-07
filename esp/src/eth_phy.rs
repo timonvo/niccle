@@ -122,7 +122,7 @@ impl<
     }
 
     /// Returns stats about this instance's activity so far.
-    pub fn stats(&mut self) -> TxRxStats {
+    pub fn stats(&self) -> TxRxStats {
         self.interrupt_handler
             .use_attached_resources(|resources, _| resources.stats)
     }
@@ -143,7 +143,7 @@ impl<
     /// This method currently disables all interrupts during transmission (which means that any
     /// incoming packets will not trigger [InterruptHandler::on_rx_interrupt], and hence will be
     /// dropped), but that may be improved in the future.
-    pub fn transmit_packet(&mut self, data: &[u8]) {
+    pub fn transmit_packet(&self, data: &[u8]) {
         self.interrupt_handler
             .use_attached_resources(|resources, _| {
                 // Disable the LTP timer, since we we're about to transmit data and so no LTP will

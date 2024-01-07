@@ -42,7 +42,7 @@ fn main() -> ! {
     // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER we
     // defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the RX debug
     // output signal.
-    let mut eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
+    let eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
         clocks: &clocks,
         interrupt_handler: &ETH_INTERRUPT_HANDLER,
         timer: timg0.timer0,
