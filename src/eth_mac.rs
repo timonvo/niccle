@@ -1,6 +1,7 @@
 //! Implements the functionality of an Ethernet 10BASE-T MAC layer, like preparing outgoing Ethernet
 //! packets and passing them to the PHY layer, and validating incoming packets' checksums.
 
+use crate::debug_util;
 use bitvec::prelude::*;
 use crc32fast;
 use log::{debug, log, warn};
@@ -27,7 +28,7 @@ pub const MAX_PACKET_SIZE: usize = MAX_FRAME_SIZE + 8;
 pub fn on_rx_packet_received(data: &mut [u8]) {
     if log::log_enabled!(log::Level::Debug) {
         debug!("--- Unaligned packet from PHY, in network bit order");
-        crate::debug_util::log_data_binary(log::Level::Debug, data);
+        debug_util::log_data_binary(log::Level::Debug, data);
     }
 
     // Find the SFD by iterating bit by bit through the data (the SFD sequence could happen to align
@@ -117,38 +118,19 @@ pub fn on_rx_packet_received(data: &mut [u8]) {
             log::Level::Info
         };
         log!(log_level, "--- Aligned packet, in network bit order",);
-        crate::debug_util::log_data_binary_hex(log_level, aligned_data);
+        debug_util::log_data_binary_hex(log_level, aligned_data);
     }
 
     // Log a diagnostic log for the received package, and indicate whether the CRC matched.
-    let log_level = if crc_ok {
-        log::Level::Info
-    } else {
-        log::Level::Warn
-    };
     log!(
-        log_level,
-        "<<< RX {} bytes, \
-        CRC {} (calculated: {calculated_crc:08X}, received:  {received_crc:08X}), \t \
-        dst {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X},\t\
-        src {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X},\t\
-        type 0x{:02X}{:02X}",
-        aligned_data.len(),
+        if crc_ok {
+            log::Level::Debug
+        } else {
+            log::Level::Warn
+        },
+        "<<< RX {} CRC {} (calculated: {calculated_crc:08X}, received: {received_crc:08X})",
+        debug_util::FormatEthernetFrame(data),
         if crc_ok { "ok" } else { "NOT OK!" },
-        aligned_data[0],
-        aligned_data[1],
-        aligned_data[2],
-        aligned_data[3],
-        aligned_data[4],
-        aligned_data[5],
-        aligned_data[6],
-        aligned_data[7],
-        aligned_data[8],
-        aligned_data[9],
-        aligned_data[10],
-        aligned_data[11],
-        aligned_data[12],
-        aligned_data[13],
     );
 
     // TODO: Expand this implementation to actually store valid frames for later consumption by a

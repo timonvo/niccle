@@ -112,6 +112,40 @@ pub fn log_data_binary_hex(log_level: log::Level, data: &[u8]) {
     log_data(log_level, data, BinaryAndHexFormatter)
 }
 
+pub struct FormatEthernetFrame<'a>(pub &'a [u8]);
+impl<'a> core::fmt::Display for FormatEthernetFrame<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0.len() < 14 {
+            panic!("Frame data too short!")
+        }
+
+        let data = self.0;
+        write!(
+            f,
+            "EthFrame(len: {}, type 0x{:02X}{:02X}, \
+                dst {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, \
+                src {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+            data.len(),
+            data[12],
+            data[13],
+            data[0],
+            data[1],
+            data[2],
+            data[3],
+            data[4],
+            data[5],
+            data[6],
+            data[7],
+            data[8],
+            data[9],
+            data[10],
+            data[11],
+        )?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
