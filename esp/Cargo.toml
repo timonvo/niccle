@@ -27,12 +27,15 @@ esp-println = { version = "0.8.0", default-features = false, features = [
 esp32c3-hal = { version = "0.14.0", optional = true }
 esp32c6-hal = { version = "0.7.0", optional = true }
 log = { workspace = true }
+byteorder = { workspace = true }
 # This is an optional (but enabled-by-default) dependency, because it isn't compatible with the
 # ESP32-C3 chip (since it needs support for atomic instructions, which C3 chips don't have), and we
 # need to be able to build the `cycle_counting` example binary (which doesn't depend on `niccle` for
 # that chip).
 niccle = { path = "../", optional = true }
 niccle_proc_macros = { path = "../proc_macros" }
+smoltcp = { workspace = true }
+heapless = "0.8.0"
 
 [lib]
 # We don't have any tests or benchmarks yet, and this silences the 'can't find crate for `test`'
@@ -64,4 +67,9 @@ required-features = ["esp32c6"]
 [[example]]
 # This example only supports the ESP32-C6 chip for the time being.
 name = "simple_signal_integrity_check"
+required-features = ["esp32c6"]
+
+[[example]]
+# This example only supports the ESP32-C6 chip for the time being.
+name = "smoltcp_ping"
 required-features = ["esp32c6"]

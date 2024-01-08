@@ -1,6 +1,8 @@
 //! Implements the functionality of an Ethernet 10BASE-T MAC layer, like preparing outgoing Ethernet
 //! packets and passing them to the PHY layer, and validating incoming packets' checksums.
 
+pub mod smoltcp;
+
 use crate::debug_util;
 use bitvec::prelude::*;
 use core::cell::RefCell;
@@ -16,6 +18,8 @@ pub const MIN_FRAME_SIZE: usize = 64;
 /// 2 bytes of EtherType, 1500 bytes of payload, and 4 bytes of FCS (we don't support 802.1q-tagged
 /// frames).
 pub const MAX_FRAME_SIZE: usize = 1518;
+/// The length of a frame's FCS sequence, in bytes.
+pub const FCS_SIZE: usize = 4;
 /// The maximum size of an Ethernet packet (8 bytes of preamble & SFD plus the frame data).
 pub const MAX_PACKET_SIZE: usize = MAX_FRAME_SIZE + 8;
 
@@ -65,29 +69,42 @@ impl<'a, P: PhyTx<'a>> MacTx<'a, P> {
         mac_tx
     }
 
-    /// Transmits the given frame, blocking until the transmission has finished.
+    /// Transmits the given frame. See [MacTx::transmit_frame_with] for more details.
+    pub fn transmit_frame(&mut self, frame_data: &[u8]) {
+        self.transmit_frame_with(frame_data.len(), |buffer| {
+            buffer.copy_from_slice(frame_data)
+        });
+    }
+
+    /// Transmits a frame of given length `len` and using `f` to produce the data to transmit.
+    ///
+    /// This method blocks until the transmission has finished.
     ///
     /// The provided data may or may not be padded already, but must not contain an FCS. A preamble
     /// and SFD will be prepended, and the FCS will be calculated by this method before it passes
     /// the data on to the PHY layer for transmission.
-    pub fn transmit_frame(&mut self, frame_data: &[u8]) {
+    pub fn transmit_frame_with<F, R>(&mut self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
         const DATA_OFFSET: usize = PREAMBLE_AND_SFD.len();
-        const FCS_LEN: usize = 4;
 
-        // Get a subslice of the packet buffer into which we'll write the frame data, padding, and FCS.
-        let frame_buffer = &mut self.packet_buffer[DATA_OFFSET..]
-            [..(frame_data.len() + FCS_LEN).max(MIN_FRAME_SIZE)];
+        // Get a subslice of the packet buffer into which we'll write the frame data, padding, and
+        // FCS.
+        let frame_buffer =
+            &mut self.packet_buffer[DATA_OFFSET..][..(len + FCS_SIZE).max(MIN_FRAME_SIZE)];
 
         // Copy the unpadded data into the frame slice.
-        frame_buffer[..frame_data.len()].copy_from_slice(frame_data);
+        let result = f(&mut frame_buffer[..len]);
 
         // Add padding to the frame slice.
-        let padding = &mut frame_buffer[frame_data.len()..MIN_FRAME_SIZE - FCS_LEN];
+        let padding_len = MIN_FRAME_SIZE - FCS_SIZE - len.min(MIN_FRAME_SIZE - FCS_SIZE);
+        trace!("TX adding {padding_len} bytes of padding");
+        let padding = &mut frame_buffer[len..len + padding_len];
         padding.fill(0);
-        trace!("TX adding {} bytes of padding", padding.len());
 
-        // Calculate the CRc and place it at the end of the frame slice.
-        let fcs_offset = frame_buffer.len() - FCS_LEN;
+        // Calculate the CRC and place it at the end of the frame slice.
+        let fcs_offset = frame_buffer.len() - FCS_SIZE;
         let fcs = crc32fast::hash(&frame_buffer[0..fcs_offset]);
         frame_buffer[fcs_offset] = (fcs & 0xFF) as u8;
         frame_buffer[fcs_offset + 1] = ((fcs >> 8) & 0xFF) as u8;
@@ -99,6 +116,8 @@ impl<'a, P: PhyTx<'a>> MacTx<'a, P> {
 
         let packet_len = DATA_OFFSET + frame_buffer.len();
         self.phy.transmit_packet(&self.packet_buffer[0..packet_len]);
+
+        result
     }
 }
 
@@ -128,13 +147,21 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         }
     }
 
+    pub fn frame_available(&self) -> bool {
+        !self.rx_inbox.is_empty()
+    }
+
     /// Consumes one of the previously-received frames, if there is one. Note that the buffer
     /// holding the frame data will not be released until the returned [FrameRef] is
     /// [dropped][Drop::drop].
     pub fn receive(&self) -> Option<FrameRef> {
-        let frame = self.rx_inbox.pop();
-        if frame.is_some() {
-            critical_section::with(|cs| self.stats.borrow_ref_mut(cs).valid_frames_consumed += 1)
+        let mut frame = self.rx_inbox.pop();
+        if let Some(ref mut frame) = frame {
+            critical_section::with(|cs| self.stats.borrow_ref_mut(cs).valid_frames_consumed += 1);
+            debug!(
+                "<<< Consumed RX {}",
+                debug_util::FormatEthernetFrame(frame.data())
+            );
         }
         frame
     }
@@ -171,7 +198,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         // an invalid packet (either one without an SFD at all, or one with an SFD but where the
         // remaining data was truncated).
         if sfd_bit_idx.is_none() {
-            warn!(
+            debug!(
                 "Invalid packet: could not find SFD (unaligned length: {}, max SFD bit idx: \
                     {max_sfd_bit_idx})",
                 packet_data.len(),
@@ -229,11 +256,14 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
     /// be validated.
     fn validate_frame<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
         // Calculate the CRC over the frame data, and compare it with the received CRC.
-        let calculated_crc = crc32fast::hash(&data[0..data.len() - 4]);
-        let received_crc: u32 = (data[data.len() - 1] as u32) << (8 * 3)
-            | (data[data.len() - 2] as u32) << (8 * 2)
-            | (data[data.len() - 3] as u32) << 8
-            | (data[data.len() - 4] as u32);
+        let calculated_crc = crc32fast::hash(&data[..data.len() - 4]);
+        let received_crc: u32 = {
+            let crc_data = &data[data.len() - 4..];
+            (crc_data[3] as u32) << (8 * 3)
+                | (crc_data[2] as u32) << (8 * 2)
+                | (crc_data[1] as u32) << 8
+                | (crc_data[0] as u32)
+        };
         let crc_ok = calculated_crc == received_crc;
 
         // Log the aligned packet data for debugging purposes, using a higher log level if the CRC
@@ -241,7 +271,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         let aligned_packet_log_level = if crc_ok {
             log::Level::Trace
         } else {
-            log::Level::Warn
+            log::Level::Debug
         };
         if log::log_enabled!(aligned_packet_log_level) {
             log!(
@@ -253,11 +283,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
 
         // Log a diagnostic log for the received package, and indicate whether the CRC matched.
         log!(
-            if crc_ok {
-                log::Level::Debug
-            } else {
-                log::Level::Warn
-            },
+                log::Level::Debug,
             "<<< RX {} CRC {} (calculated: {calculated_crc:08X}, received: {received_crc:08X})",
             debug_util::FormatEthernetFrame(data),
             if crc_ok { "ok" } else { "NOT OK!" },
@@ -351,6 +377,11 @@ impl<const BUFFER_CAP: usize> RxInbox<BUFFER_CAP> {
             internal_ref: entry,
         })
     }
+
+    /// Returns whether the inbox is empty.
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
 }
 
 /// Frame data held in an underlying buffer. The buffer may be larger than the length of frame data.
@@ -360,8 +391,8 @@ struct FrameEntry {
 }
 impl FrameEntry {
     /// Return the slice of the buffer that actually holds valid frame data.
-    fn live_slice(&self) -> &[u8] {
-        &self.data[..self.length]
+    fn live_slice(&mut self) -> &mut [u8] {
+        &mut self.data[..self.length]
     }
 }
 
@@ -371,8 +402,8 @@ pub struct FrameRef<'a> {
     internal_ref: thingbuf::Ref<'a, FrameEntry>,
 }
 impl<'a> FrameRef<'a> {
-    /// Returns a slice containing the frame data.
-    pub fn live_data(&self) -> &[u8] {
+    /// Returns the frame data slice.
+    pub fn data(&mut self) -> &mut [u8] {
         self.internal_ref.live_slice()
     }
 }

@@ -9,3 +9,6 @@
 pub mod eth_phy;
 #[cfg(not(feature="esp32c3"))]
 mod eth_phy_dedicated_io;
+
+#[cfg(not(feature="esp32c3"))]
+pub mod debug_util;

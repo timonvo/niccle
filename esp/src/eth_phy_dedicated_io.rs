@@ -8,7 +8,7 @@ use esp32c6_hal as hal;
 
 use core::arch::asm;
 use hal::prelude::*;
-use log::{trace, warn};
+use log::{trace, debug,warn};
 use niccle::eth_mac;
 use niccle_proc_macros::asm_with_perf_counter;
 
@@ -969,7 +969,7 @@ pub fn receive_packet<'a>(
             trace!("LTP: code: {result_code}, CPU cycles spent: {cycles_receiving}");
             return ReceivedTransmission::LinkTestPulse;
         }
-        warn!(
+        debug!(
             "Truncated transmission (code: {result_code}, size: {result_size}, CPU cycles spent: \
             {cycles_receiving}): {:08b} {:08b} {:08b}",
             buffer[0], buffer[1], buffer[2],

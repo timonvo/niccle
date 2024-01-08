@@ -31,6 +31,12 @@ checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
 
 [[package]]
 name = "bitflags"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+
+[[package]]
+name = "bitflags"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "327762f6e5a765692301e5bb513e0d9fef63be86bbc14528052b1cd3e6f03e07"
@@ -236,7 +242,7 @@ checksum = "30e9f181669edeb35ef6d6c5518c9941900dbf2133348673eebb4b33fb73ac62"
 dependencies = [
  "basic-toml",
  "bitfield",
- "bitflags",
+ "bitflags 2.4.1",
  "cfg-if",
  "critical-section",
  "embassy-executor",
@@ -461,6 +467,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
+name = "managed"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
+
+[[package]]
 name = "memchr"
 version = "2.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,9 +507,11 @@ name = "niccle"
 version = "0.1.0"
 dependencies = [
  "bitvec",
+ "byteorder",
  "crc32fast",
  "critical-section",
  "log",
+ "smoltcp",
  "thingbuf",
 ]
 
@@ -505,14 +519,17 @@ dependencies = [
 name = "niccle_esp"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "critical-section",
  "esp-backtrace",
  "esp-println 0.8.0",
  "esp32c3-hal",
  "esp32c6-hal",
+ "heapless",
  "log",
  "niccle",
  "niccle_proc_macros",
+ "smoltcp",
 ]
 
 [[package]]
@@ -694,6 +711,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.43",
+]
+
+[[package]]
+name = "smoltcp"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a1a996951e50b5971a2c8c0fa05a381480d70a933064245c4a223ddc87ccc97"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "cfg-if",
+ "heapless",
+ "log",
+ "managed",
 ]
 
 [[package]]

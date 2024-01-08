@@ -1,6 +1,7 @@
 //! This example binary uses the `niccle_esp::eth_phy` module to transmit a hardcoded ARP request
 //! and receive any incoming (response) packets. Incoming packets are handled by the
 //! [niccle::eth_mac] crate, which currently validates them and prints some diagnostics.
+//! Make sure the device can reach a peer at IP 169.254.172.115!
 //!
 //! It is currently only tested on ESP32-C6 chips.
 
@@ -87,30 +88,7 @@ fn main() -> ! {
 
     loop {
         // Print some stats about our progress so far.
-        let phy_stats = eth_phy.stats();
-        let mac_rx_stats = ETH_MAC_RX.stats();
-        info!("--- Stats ---");
-        info!(
-            "PHY TX: Packets:  {:5},              {:4}  LTPs:        {:7}",
-            phy_stats.tx.packets_sent, "", phy_stats.tx.ltps_sent,
-        );
-        info!(
-            "PHY RX: Packets:  {:5}, trunc:       {:4}, LTPs:        {:7}",
-            phy_stats.rx.probable_packets_received,
-            phy_stats.rx.truncated_packets_received,
-            phy_stats.rx.ltps_received,
-        );
-
-        info!(
-            "MAC RX: Packets:  {:5}, invalid SFD: {:4}, invalid CRC: {:7}",
-            mac_rx_stats.valid_frames_received,
-            mac_rx_stats.invalid_sfd_packets_received,
-            mac_rx_stats.invalid_crc_packets_received,
-        );
-        info!(
-            "        Consumed: {:5}, dropped:     {:4}",
-            mac_rx_stats.valid_frames_consumed, mac_rx_stats.valid_frames_dropped
-        );
+        niccle_esp::debug_util::log_phy_mac_stats(&eth_phy.stats(), &ETH_MAC_RX.stats());
 
         // Transmit the packet (note that the MacTx will pad the frame and calculate its FCS, while
         // the Phy will Manchester-encode it as it is transmitted).
@@ -119,8 +97,8 @@ fn main() -> ! {
         delay.delay_ms(2000u32);
 
         // Consume any frames that may have arrived since we last checked from the MacRx buffer.
-        while let Some(frame) = ETH_MAC_RX.receive() {
-            debug!("<<< Consumed RX {}", FormatEthernetFrame(frame.live_data()));
+        while let Some(mut frame) = ETH_MAC_RX.receive() {
+            debug!("<<< Consumed RX {}", FormatEthernetFrame(frame.data()));
         }
     }
 }
