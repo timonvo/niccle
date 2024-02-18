@@ -8,7 +8,7 @@ use esp32c6_hal as hal;
 
 use core::arch::asm;
 use hal::prelude::*;
-use log::{trace, debug,warn};
+use log::{debug, trace, warn};
 use niccle::eth_mac;
 use niccle_proc_macros::asm_with_perf_counter;
 
@@ -63,7 +63,7 @@ pub const RX_DEBUG_CPU_OUTPUT_SIGNAL: hal::gpio::OutputSignal = {
 /// The dedicated IO output signal index to use for the debug signal we emit in the RX loop(from 0
 /// to 7, where 0 corresponds to CPU_GPIO_OUT0). Based on whatever [RX_DEBUG_CPU_OUTPUT_SIGNAL] is
 /// set to.
-const RX_DEBUG_CPU_OUTPUT_SIGNAL_CSR_IDX: isize = {
+pub const RX_DEBUG_CPU_OUTPUT_SIGNAL_CSR_IDX: isize = {
     #[cfg(feature = "esp32c3")]
     let signal0 = hal::gpio::OutputSignal::CPU_GPIO_0;
     #[cfg(feature = "esp32c6")]
@@ -89,10 +89,6 @@ const CSR_CPU_GPIO_IN: u32 = 0x804;
 /// transmission of an actual data packet. This is the minimum frame size plus one byte for the SFD,
 /// since we must have observed the SFD in order to be to align the frame data correctly.
 const RX_MIN_DATA_SIZE_BYTES: usize = eth_mac::MIN_FRAME_SIZE + 1;
-/// The maximum amount of data we expect to write to our receive buffer during an incoming
-/// transmission. This is the max packet size plus one byte, to account for parts of the TP_IDL that
-/// may get written to the buffer before we end the receive loop.
-pub const RX_BUFFER_SIZE_BYTES: usize = eth_mac::MAX_PACKET_SIZE + 1;
 
 /// Transmits a single link test pulse.
 ///
@@ -402,6 +398,8 @@ pub fn transmit_packet(data: &[u8], _tx_periph: &mut impl hal::gpio::OutputPin) 
     // Ehe final cycle spent resetting the signal level back to 0 after TP_IDL.
     cycles_expected += 1;
     if cycles_transmitting != cycles_expected {
+        // Try again.
+        // transmit_packet(data)
         warn!(
             "transmit_packet loop took {cycles_transmitting} cycles instead of the \
                 {cycles_expected} cycles we expected."
@@ -417,7 +415,7 @@ pub fn transmit_packet(data: &[u8], _tx_periph: &mut impl hal::gpio::OutputPin) 
 /// accurately reflect the timing of interrupt invocation, relative to the timing of the incoming
 /// packet. E.g. both the incoming signal and the debug signal can be inspected using an
 /// oscilloscope to figure out the interrupt routine latency.
-#[ram]
+#[inline(always)]
 pub fn emit_receive_interrupt_debug_signal() {
     unsafe {
         asm!(
@@ -425,9 +423,16 @@ pub fn emit_receive_interrupt_debug_signal() {
             "csrrci zero, {csr_cpu_gpio_out}, 1<<{debug_cpu_signal_idx}",
             // Next, pulse the line twice, leaving it low at the end.
             "csrrsi zero, {csr_cpu_gpio_out}, 1<<{debug_cpu_signal_idx}",
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            "nop",
             "csrrci zero, {csr_cpu_gpio_out}, 1<<{debug_cpu_signal_idx}",
-            "csrrsi zero, {csr_cpu_gpio_out}, 1<<{debug_cpu_signal_idx}",
-            "csrrci zero, {csr_cpu_gpio_out}, 1<<{debug_cpu_signal_idx}",
+            "nop",
+            "nop",
+            "nop",
             csr_cpu_gpio_out = const(CSR_CPU_GPIO_OUT),
             debug_cpu_signal_idx = const(RX_DEBUG_CPU_OUTPUT_SIGNAL_CSR_IDX)
         );
@@ -570,7 +575,7 @@ pub enum ReceivedTransmission<'a> {
 /// `RX_CPU_INPUT_SIGNAL` and `RX_DEBUG_CPU_OUTPUT_SIGNAL` signals.
 #[ram]
 pub fn receive_packet<'a>(
-    buffer: &'a mut [u8; RX_BUFFER_SIZE_BYTES],
+    buffer: &'a mut [u8],
     _rx_periph: &mut impl hal::gpio::InputPin,
     _rx_debug_periph: &mut impl hal::gpio::OutputPin,
 ) -> ReceivedTransmission<'a> {

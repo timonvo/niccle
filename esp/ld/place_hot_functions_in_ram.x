@@ -13,13 +13,13 @@ SECTIONS {
     Hence we must cast fairly wide net here and include most of the code in our binary in order
     to achieve maximum throughput.
      */
+    *(.text.*bbqueue*)
     *(.text.*bitvec*)
     *(.text.*crc32fast*)
     *(.text.*critical_section*)
     *(.text.*memcpy*)
     *(.text.*niccle*)
     *(.text.*smoltcp*)
-    *(.text.*thingbuf*)
     . = ALIGN(4);
   } > RWTEXT
 }

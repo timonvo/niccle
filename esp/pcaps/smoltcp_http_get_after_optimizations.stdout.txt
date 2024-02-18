@@ -1,0 +1,50 @@
+INFO - Booted up!
+INFO - Created MAC instance!
+INFO - === Issuing 5 HTTP GET requests for /10kB.txt   
+INFO - Received 10068 bytes over 3.983s (2.5kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 0.017s (592.2kB/sec) with CRC32 2361199371 
+INFO - Received 10068 bytes over 0.020s (503.4kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 0.020s (503.4kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 0.018s (559.3kB/sec) with CRC32 2361199371
+INFO - --- Stats ---
+INFO - PHY TX: Packets:     23,                    LTPs:            311
+INFO - PHY RX: Packets:     55, trunc:          0, LTPs:            288, OOM:   0
+INFO - MAC RX: Packets:     55, invalid SFD:    0, invalid CRC:       0
+INFO -           Valid:     55
+INFO - 
+INFO - === Issuing 5 HTTP GET requests for /100kB.txt
+INFO - Received 100069 bytes over 0.164s (610.2kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 0.163s (613.9kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 0.163s (613.9kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 0.163s (613.9kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 0.163s (613.9kB/sec) with CRC32 3505040786
+INFO - --- Stats ---
+INFO - PHY TX: Packets:    173,                    LTPs:            313
+INFO - PHY RX: Packets:    415, trunc:          0, LTPs:            290, OOM:   0
+INFO - MAC RX: Packets:    415, invalid SFD:    0, invalid CRC:       0
+INFO -           Valid:    415
+INFO - 
+INFO - === Issuing 5 HTTP GET requests for /1MB.txt
+INFO - Received 1000070 bytes over 1.618s (618.1kB/sec) with CRC32 2795970732
+INFO - Received 1000070 bytes over 1.605s (623.1kB/sec) with CRC32 2795970732
+INFO - Received 1000070 bytes over 1.604s (623.5kB/sec) with CRC32 2795970732
+INFO - Received 1000070 bytes over 1.616s (618.9kB/sec) with CRC32 2795970732
+INFO - Received 1000070 bytes over 1.618s (618.1kB/sec) with CRC32 2795970732
+INFO - --- Stats ---
+INFO - PHY TX: Packets:   1643,                    LTPs:            316
+INFO - PHY RX: Packets:   3855, trunc:          0, LTPs:            292, OOM:   0
+INFO - MAC RX: Packets:   3855, invalid SFD:    0, invalid CRC:       0
+INFO -           Valid:   3855
+INFO - 
+INFO - === Issuing 5 HTTP GET requests for /3MB.txt
+INFO - Received 3000070 bytes over 4.846s (619.1kB/sec) with CRC32 2966222055
+INFO - Received 3000070 bytes over 4.851s (618.4kB/sec) with CRC32 2966222055
+INFO - Received 3000070 bytes over 4.855s (617.9kB/sec) with CRC32 2966222055
+INFO - Received 3000070 bytes over 4.839s (620.0kB/sec) with CRC32 2966222055
+INFO - Received 3000070 bytes over 4.829s (621.3kB/sec) with CRC32 2966222055
+INFO - --- Stats ---
+INFO - PHY TX: Packets:   6053,                    LTPs:            319
+INFO - PHY RX: Packets:  14146, trunc:          0, LTPs:            294, OOM:   0
+INFO - MAC RX: Packets:  14146, invalid SFD:    0, invalid CRC:       0
+INFO -           Valid:  14146
+INFO - 

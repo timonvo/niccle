@@ -8,7 +8,7 @@ use bitvec::prelude::*;
 use core::cell::RefCell;
 use crc32fast;
 use critical_section::Mutex;
-use log::{debug, log, trace, warn};
+use log::{debug, log, trace};
 
 /// The minimum size of an Ethernet frame. 64 equals 12 bytes of destination and source addresses, 2
 /// bytes of EtherType, 46 bytes of payload, and 4 bytes of FCS (we don't support 802.1q-tagged
@@ -31,16 +31,29 @@ pub trait PhyTx<'a> {
 
 /// A trait implemented by the MAC layer to allow the PHY layer to pass received packets to the MAC
 /// layer.
-pub trait PhyRxCallback {
-    /// Should be called when a packet has been received at the PHY layer. The `data` slice must
-    /// contain part of the preamble, the SFD, the frame data, and up to two bits of TP_IDL signal.
-    /// Each byte in the slice must contain at least one bit of packet data (i.e. there must be no
-    /// trailing bytes of bogus data). The callee is responsible for aligning and validating the
-    /// data.
+pub trait PhyRxToMacRxBridge {
+    /// Called by the PHY layer when it needs a new buffer to be allocated for it to write packet
+    /// data to.
+    ///
+    /// The MAC layer must allocate a new buffer of [MAX_PACKET_SIZE] and pass it to
+    /// `buffer_fn`, which will return how much (unaligned and unvalidated) packet data was
+    /// actually written to the buffer, after which the MAC layer must commit that buffer to the RX
+    /// queue for later validation and consumption.
+    ///
+    /// The committed packet data will contain part of the preamble, the SFD, the frame data, and up
+    /// to two bits of TP_IDL signal. Each byte in the buffer will contain at least one bit of
+    /// packet data (i.e. there must be no trailing bytes of bogus data). The callee is responsible
+    /// for aligning and validating the data.
+    ///
+    /// This method must return `true` if `buffer_fn` was actually called, and `false` if no
+    /// buffer space could be allocated (e.g. the RX queue is full) and hence `buffer_fn` was
+    /// not called.
     ///
     /// Note: since this code may be invoked from within an interrupt routine it should ideally not
     /// block for very long.
-    fn on_packet_received(&self, data: &mut [u8]);
+    fn with_new_packet_buffer<F>(&mut self, buffer_fn: F) -> bool
+    where
+        F: FnOnce(&mut [u8]) -> usize;
 }
 
 /// A MAC layer implementation for sending outgoing Ethernet frames.
@@ -116,54 +129,51 @@ impl<'a, P: PhyTx<'a>> MacTx<'a, P> {
 
         let packet_len = DATA_OFFSET + frame_buffer.len();
         self.phy.transmit_packet(&self.packet_buffer[0..packet_len]);
-
         result
     }
 }
 
-/// A MAC layer implementation for receiving incoming Ethernet frames.
+/// A MAC layer implementation for receiving incoming Ethernet packets.
 ///
-/// This implementation will buffer up to `BUFFER_CAP` frames, which can then be consumed by calling
-/// [MacRx::receive]. If the frame is full then any further incoming frames will be dropped until
-/// one of the previously received frames has been consumed.
+/// This implementation will buffer up to `BUFFER_CAP` bytes worth of data.
 pub struct MacRx<const BUFFER_CAP: usize> {
-    rx_inbox: RxInbox<BUFFER_CAP>,
+    packet_queue: bbqueue::BBBuffer<BUFFER_CAP>,
     stats: Mutex<RefCell<RxStats>>,
+    rx_queue_has_capacity_again_fn: &'static (dyn Fn() + Sync),
+}
+
+/// Produces (unvalidated) packet data, by reserving buffer space for the PHY to write packet data
+/// into, and then committing that data for later consumption.
+pub struct MacRxPacketProducer<'a, const BUFFER_CAP: usize> {
+    packet_producer: bbqueue::framed::FrameProducer<'a, BUFFER_CAP>,
+}
+
+/// Provides access to the previously (unvalidated) packet data previously queued by the
+/// [MacRxPacketProducer] corresponding to this instance.
+pub struct MacRxPacketConsumer<'a, const BUFFER_CAP: usize> {
+    packet_consumer: bbqueue::framed::FrameConsumer<'a, BUFFER_CAP>,
+    stats: &'a Mutex<RefCell<RxStats>>,
+    rx_queue_has_capacity_again_fn: &'static (dyn Fn() + Sync),
 }
 
 impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
     /// Constructs a new [MacRx] instance.
-    pub const fn new() -> MacRx<BUFFER_CAP> {
+    ///
+    /// Once the [MacRx] instance's queue has filled up for the first time, it will call
+    /// `rx_queue_has_capacity_again_fn` whenever its RX buffer has capacity again.
+    pub const fn new(
+        rx_queue_has_capacity_again_fn: &'static (dyn Fn() + Sync),
+    ) -> MacRx<BUFFER_CAP> {
         MacRx {
-            rx_inbox: RxInbox::new(),
+            packet_queue: bbqueue::BBBuffer::new(),
             // We can't use Default::default() since we're in a `const fn`.`
             stats: Mutex::new(RefCell::new(RxStats {
                 invalid_sfd_packets_received: 0,
                 invalid_crc_packets_received: 0,
                 valid_frames_received: 0,
-                valid_frames_dropped: 0,
-                valid_frames_consumed: 0,
             })),
+            rx_queue_has_capacity_again_fn,
         }
-    }
-
-    pub fn frame_available(&self) -> bool {
-        !self.rx_inbox.is_empty()
-    }
-
-    /// Consumes one of the previously-received frames, if there is one. Note that the buffer
-    /// holding the frame data will not be released until the returned [FrameRef] is
-    /// [dropped][Drop::drop].
-    pub fn receive(&self) -> Option<FrameRef> {
-        let mut frame = self.rx_inbox.pop();
-        if let Some(ref mut frame) = frame {
-            critical_section::with(|cs| self.stats.borrow_ref_mut(cs).valid_frames_consumed += 1);
-            debug!(
-                "<<< Consumed RX {}",
-                debug_util::FormatEthernetFrame(frame.data())
-            );
-        }
-        frame
     }
 
     /// Returns stats about this instance's activity so far.
@@ -171,10 +181,92 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         critical_section::with(|cs| *self.stats.borrow_ref(cs))
     }
 
+    /// Splits this instance into handles that can be used to produces and consume data,
+    /// respectively. Must only be called once.
+    pub fn split(
+        &self,
+    ) -> (
+        MacRxPacketProducer<'_, BUFFER_CAP>,
+        MacRxPacketConsumer<'_, BUFFER_CAP>,
+    ) {
+        let (producer, consumer) = self.packet_queue.try_split_framed().unwrap();
+        (
+            MacRxPacketProducer {
+                packet_producer: producer,
+            },
+            MacRxPacketConsumer {
+                packet_consumer: consumer,
+                stats: &self.stats,
+                rx_queue_has_capacity_again_fn: self.rx_queue_has_capacity_again_fn,
+            },
+        )
+    }
+}
+
+impl<'a, const BUFFER_CAP: usize> MacRxPacketConsumer<'a, BUFFER_CAP> {
+    /// Consumes one of the previously-received packets, if there is one. Note that the buffer
+    /// holding the frame data will not be released until the returned [FrameRef] is
+    /// [dropped][Drop::drop].
+    pub fn receive(&mut self) -> Option<FrameRef<'a, BUFFER_CAP>> {
+        loop {
+            let packet = self.packet_consumer.read();
+            if let Some(mut packet) = packet {
+                // Release the frame data once the frame instance is dropped.
+                packet.auto_release(true);
+
+                let Some(aligned_frame_data) = self.align_packet(&mut packet) else {
+                    critical_section::with(|cs| {
+                        self.stats.borrow_ref_mut(cs).invalid_sfd_packets_received += 1;
+                    });
+                    // This packet couldn't be aligned, so skip over it and move on to the next
+                    // packet in the RX queue.
+                    continue;
+                };
+                let Some(validated_frame_data) = self.validate_frame(aligned_frame_data) else {
+                    critical_section::with(|cs| {
+                        self.stats.borrow_ref_mut(cs).invalid_crc_packets_received += 1;
+                    });
+                    // This frame couldn't be validated, so skip over it and move on to the next
+                    // packet in the RX queue.
+                    continue;
+                };
+                let frame_ref = FrameRef {
+                    length: validated_frame_data.len(),
+                    // Thanks to our use of `auto_release(true)` the packet buffer will be released
+                    // once this field is dropped, and hence, once the `FrameRef` is dropped.
+                    internal_ref: packet,
+                };
+                // We successfully aligned the frame data, and the CRC check passed, so we can
+                // return the frame to the caller.
+                critical_section::with(|cs| {
+                    let mut stats = self.stats.borrow_ref_mut(cs);
+                    stats.valid_frames_received += 1;
+                });
+
+                debug!(
+                    "<<< RX {}",
+                    debug_util::FormatEthernetFrame(&frame_ref.internal_ref)
+                );
+                return Some(frame_ref);
+            } else {
+                // Once we've depleted the MAC RX buffer we should indicate that the RX interrupt
+                // can be turned on again to start receiving new packets, if it was previously
+                // turned off because of the RX buffer being full.
+                //
+                // TODO(optimization): should we turn the RX interrupt on earlier? E.g. after the
+                // very first packet has been consumed? Perhaps only once enough capacity is
+                // available for a whole new frame? We don't have access to the available capacity
+                // at this point though...
+                (self.rx_queue_has_capacity_again_fn)();
+                return None;
+            }
+        }
+    }
+
     /// Attempts to align the given packet data by finding the SFD.
     ///
     /// Returns a slice to the aligned data incl. the FCS, or None if the data could not be aligned.
-    fn align_packet<'a>(&self, packet_data: &'a mut [u8]) -> Option<&'a [u8]> {
+    fn align_packet<'b>(&self, packet_data: &'b mut [u8]) -> Option<&'b [u8]> {
         if log::log_enabled!(log::Level::Trace) {
             trace!("--- Unaligned packet from PHY, in network bit order");
             debug_util::log_data_binary(log::Level::Trace, packet_data);
@@ -187,34 +279,32 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         // first 8 octets of the data stream, in general. If the data stream is shorter than
         // MIN_FRAME_SIZE + 8, then we know the SFD must occur even earlier than that (since
         // otherwise there wouldn't be enough aligned data to make up a minimum-sized frame).
-        let max_sfd_bit_idx = 8 * (PREAMBLE_AND_SFD.len().min(packet_data.len() - MIN_FRAME_SIZE));
+        let max_sfd_bit_idx = 8
+            * (PREAMBLE_AND_SFD
+                .len()
+                .min(packet_data.len() - MIN_FRAME_SIZE));
         // The data we receive from the PHY is in LSB-received-first order.
         let data_bits = packet_data.view_bits_mut::<Lsb0>();
         // Find the SFD in the data bit stream, by looking at 8 bits at a time.
-        let sfd_bit_idx = data_bits[..max_sfd_bit_idx]
+        let Some(sfd_bit_idx) = data_bits[..max_sfd_bit_idx]
             .windows(8)
-            .position(|octet| octet == sfd);
-        // If we couldn't find the SFD (and therefore the start of the frame data), then we've got
-        // an invalid packet (either one without an SFD at all, or one with an SFD but where the
-        // remaining data was truncated).
-        if sfd_bit_idx.is_none() {
+            .position(|octet| octet == sfd)
+        else {
+            // If we couldn't find the SFD (and therefore the start of the frame data), then we've got
+            // an invalid packet (either one without an SFD at all, or one with an SFD but where the
+            // remaining data was truncated).
             debug!(
                 "Invalid packet: could not find SFD (unaligned length: {}, max SFD bit idx: \
                     {max_sfd_bit_idx})",
                 packet_data.len(),
             );
             return None;
-        }
+        };
         // We found the SFD in the data, and hence we know where the frame data starts.
-        let data_start_bit_idx = sfd_bit_idx.unwrap() + 8;
+        let data_start_bit_idx = sfd_bit_idx + 8;
 
         // Shift the raw received data to the left so that the frame data (which starts right after
         // the SFD) is at bit/byte index 0 in the data buffer.
-        //
-        // TODO(optimization): Instead of shifting the data here and then copying the aligned data
-        // into the RxInbox entry later on, we could instead reserve an RxInbox buffer entry first,
-        // and then shift the aligned data into that buffer directly. That would reduce the number
-        // of data copies by one.
         data_bits.shift_left(data_start_bit_idx);
 
         // At this point the data buffer should have properly aligned frame data in it, but we still
@@ -243,6 +333,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
         );
 
         let aligned_data = &packet_data[0..data_end_byte_idx];
+
         // If the slice we constructed is somehow shorter than a minimum frame size, then something
         // went wrong, because our SFD discovery mechanism above should only allow for aligned
         // frames of MIN_FRAME_SIZE or larger.
@@ -254,7 +345,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
     ///
     /// Returns a slice to the validated frame data without the FCS, or None is the data could not
     /// be validated.
-    fn validate_frame<'a>(&self, data: &'a [u8]) -> Option<&'a [u8]> {
+    fn validate_frame<'b>(&mut self, data: &'b [u8]) -> Option<&'b [u8]> {
         // Calculate the CRC over the frame data, and compare it with the received CRC.
         let calculated_crc = crc32fast::hash(&data[..data.len() - 4]);
         let received_crc: u32 = {
@@ -283,7 +374,7 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
 
         // Log a diagnostic log for the received package, and indicate whether the CRC matched.
         log!(
-                log::Level::Debug,
+            log::Level::Debug,
             "<<< RX {} CRC {} (calculated: {calculated_crc:08X}, received: {received_crc:08X})",
             debug_util::FormatEthernetFrame(data),
             if crc_ok { "ok" } else { "NOT OK!" },
@@ -291,141 +382,44 @@ impl<const BUFFER_CAP: usize> MacRx<BUFFER_CAP> {
 
         if crc_ok {
             // Return the validated frame data, without the FCS.
-            Some(&data[0..data.len() - 4])
+            Some(&data[0..data.len() - FCS_SIZE])
         } else {
             None
         }
     }
 }
 
-impl<const BUFFER_CAP: usize> PhyRxCallback for MacRx<BUFFER_CAP> {
-    /// Handles (potential) packets received by the PHY layer.
-    ///
-    /// Strips the preamble and SFD, aligns the frame data, performs FCS validation, and stores
-    /// valid frames away for later consumption.
-    fn on_packet_received(&self, packet_data: &mut [u8]) {
-        let aligned_frame_data = self.align_packet(packet_data);
-        if aligned_frame_data.is_none() {
-            critical_section::with(|cs| {
-                self.stats.borrow_ref_mut(cs).invalid_sfd_packets_received += 1;
-            });
-            return;
-        }
-        let validated_frame_data = self.validate_frame(aligned_frame_data.unwrap());
-        if validated_frame_data.is_none() {
-            critical_section::with(|cs| {
-                self.stats.borrow_ref_mut(cs).invalid_crc_packets_received += 1;
-            });
-            return;
-        }
-        // We successfully aligned the frame data, and the CRC check passed, so we must store the
-        // frame away for later consumption.
-        critical_section::with(|cs| {
-            let mut stats = self.stats.borrow_ref_mut(cs);
-            stats.valid_frames_received += 1;
-
-            // If we can't add the frame to the inbox then we have no choice but to drop it.
-            if !self.rx_inbox.push(validated_frame_data.unwrap()) {
-                // TODO: Consider sending a pause frame here, to throttle the rate of incoming data
-                // down to what we are able to process.
-                stats.valid_frames_dropped += 1;
-                warn!("<<< Dropped RX frame");
-            }
-        });
-    }
-}
-
-/// A container holding received frames.
-///
-/// This implementation can hold up to `BUFFER_CAP` received frames, and returns frames in FIFO
-/// order.
-struct RxInbox<const BUFFER_CAP: usize> {
-    // We could've also used a `heapless::Deque` here, but StaticThingBuf allows us to avoid copies
-    // through its `push_ref` and `pop_ref` methods.
-    //
-    // TODO(optimization): Instead of a queue of a fixed number of constant-sized frames, we could
-    // use another data structure that pools all frame data in one large buffer (like a ring
-    // buffer), and allocates only as much data as needed from the buffer for each frame. That could
-    // allow us to queue many small packets without incurring 1518 bytes of memory per packet.
-    frames: thingbuf::StaticThingBuf<FrameEntry, BUFFER_CAP, FrameRecycle>,
-}
-
-impl<const BUFFER_CAP: usize> RxInbox<BUFFER_CAP> {
-    const fn new() -> RxInbox<BUFFER_CAP> {
-        RxInbox {
-            frames: thingbuf::StaticThingBuf::with_recycle(FrameRecycle),
-        }
-    }
-
-    /// Pushes a new frame into the back of the frame queue. Returns true if the operation
-    /// succeeded, or false if it failed because there was no room for the frame.
-    fn push(&self, data: &[u8]) -> bool {
-        // Grab a slot for the buffer, if there's room.
-        let Ok(mut entry) = self.frames.push_ref() else {
+impl<'a, const BUFFER_CAP: usize> PhyRxToMacRxBridge for MacRxPacketProducer<'a, BUFFER_CAP> {
+    fn with_new_packet_buffer<F>(&mut self, buffer_fn: F) -> bool
+    where
+        F: FnOnce(&mut [u8]) -> usize,
+    {
+        // Try to reserve a large enough buffer.
+        let Ok(mut grant) = self.packet_producer.grant(MAX_PACKET_SIZE) else {
             return false;
         };
 
-        // Copy the frame data into the inbox buffer.
-        entry.length = data.len();
-        entry.data[..data.len()].copy_from_slice(data);
+        // Pass the buffer to the caller.
+        let len = buffer_fn(&mut grant);
+
+        // Commit however many bytes of the buffer that `buffer_fn` indicates.
+        if len > 0 {
+            grant.commit(len);
+        }
         true
-    }
-
-    /// Pops a frame from the front of the frame queue, if one is available.
-    fn pop(&self) -> Option<FrameRef> {
-        self.frames.pop_ref().map(|entry| FrameRef {
-            internal_ref: entry,
-        })
-    }
-
-    /// Returns whether the inbox is empty.
-    fn is_empty(&self) -> bool {
-        self.frames.is_empty()
-    }
-}
-
-/// Frame data held in an underlying buffer. The buffer may be larger than the length of frame data.
-struct FrameEntry {
-    data: [u8; MAX_FRAME_SIZE],
-    length: usize,
-}
-impl FrameEntry {
-    /// Return the slice of the buffer that actually holds valid frame data.
-    fn live_slice(&mut self) -> &mut [u8] {
-        &mut self.data[..self.length]
     }
 }
 
 /// A reference to frame data. Only once the reference is [dropped](Drop::drop) will the underlying
 /// data buffer be released for reuse.
-pub struct FrameRef<'a> {
-    internal_ref: thingbuf::Ref<'a, FrameEntry>,
+pub struct FrameRef<'a, const BUFFER_CAP: usize> {
+    internal_ref: bbqueue::framed::FrameGrantR<'a, BUFFER_CAP>,
+    length: usize,
 }
-impl<'a> FrameRef<'a> {
+impl<'a, const BUFFER_CAP: usize> FrameRef<'a, BUFFER_CAP> {
     /// Returns the frame data slice.
     pub fn data(&mut self) -> &mut [u8] {
-        self.internal_ref.live_slice()
-    }
-}
-
-/// A [thingbuf] recycling strategy for reusing [FrameEntry] instances, which avoids unnecessary
-/// copies.
-///
-/// We'll never read more data from a [FrameEntry] than was written to it, so we never actually have
-/// to clear or reset the underlying data buffer (which the default
-/// [thingbuf::recycling::DefaultRecycle] strategy would do, wasting unnecessary CPU cycles in the
-/// process).
-struct FrameRecycle;
-impl thingbuf::Recycle<FrameEntry> for FrameRecycle {
-    fn new_element(&self) -> FrameEntry {
-        FrameEntry {
-            data: [0u8; MAX_FRAME_SIZE],
-            length: 0,
-        }
-    }
-
-    fn recycle(&self, _: &mut FrameEntry) {
-        // Do nothing.
+        &mut self.internal_ref[0..self.length]
     }
 }
 
@@ -440,13 +434,7 @@ pub struct RxStats {
     pub invalid_crc_packets_received: u32,
     /// The number of received packets that contained valid frames.
     pub valid_frames_received: u32,
-    /// The number of valid frames reported in `valid_frames_received` that had to be dropped
-    /// because there was no buffer space.
-    pub valid_frames_dropped: u32,
-    /// The number of valid frames reported in `valid_frames_received` that were later successfully
-    /// consumed.
-    pub valid_frames_consumed: u32,
 }
 
-// TODO: Add tests for on_packet_received.
-// TODO: Add tests for transmit_frame.
+// TODO: Add tests for MacRxPacketConsumer::receive (e.g. testing packet validation etc.).
+// TODO: Add tests for transmit_frame (e.g. testing CRC generation etc.).

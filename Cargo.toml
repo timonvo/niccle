@@ -43,12 +43,10 @@ smoltcp = { version = "0.11.0", default-features = false, features = [
 ] }
 
 [dependencies]
+bbqueue = { version = "0.5.1", default-features = false }
 bitvec = { version = "1.0.1", default-features = false }
 byteorder = { workspace = true }
 crc32fast = { workspace = true }
 critical-section = { workspace = true }
 log = { workspace = true }
 smoltcp = { workspace = true }
-thingbuf = { version = "0.1.4", default-features = false, features = [
-  "static",
-] }

@@ -24,6 +24,7 @@ use hal::{
 use log::debug;
 use log::info;
 use niccle::eth_mac;
+use niccle::eth_mac::MAX_PACKET_SIZE;
 use niccle_esp::eth_phy;
 use smoltcp::iface::Config;
 use smoltcp::iface::SocketStorage;
@@ -32,16 +33,38 @@ use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 
+// Manual tuning indicates it's best if the TCP RX buffer is smaller than the MAC RX buffer. I
+// reason that this helps ensure that the SmolTCP layer will start indicating a full receive window
+// to the sender *before* the MAC RX buffer is actually full. That way we have a chance of
+// indicating the full TCP receive window to the sender without dropping any/too many of the
+// sender's already-in-flight packets.
+//
+// A MAC RX buffer capacity of about 9 packets with a TCP RX buffer capacity of 7 TCP packets seems
+// to be the sweet spot, reaching a max throughput speed of about 645kB/sec. Larger buffer sizes
+// don't seem to increase throughput any further.
+const RX_PACKET_CAPACITY: usize = 9;
+const TCP_RX_BUFFER_CAPACITY: usize = (RX_PACKET_CAPACITY - 2) * 1460;
+// The bbqueue uses up to 8 bytes of framing metadata per entry, hence why we increase the max
+// packet size by 8 here.
+//
+// TODO: Clean this up so that such implementation details don't have to be exposed to the caller.
+const MAC_RX_BUFFER_CAPACITY: usize = RX_PACKET_CAPACITY * (MAX_PACKET_SIZE + 8);
+
 static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
     hal::timer::Timer0<hal::peripherals::TIMG0>,
     hal::gpio::Gpio5<hal::gpio::Unknown>,
     hal::gpio::Gpio6<hal::gpio::Unknown>,
     hal::gpio::Gpio10<hal::gpio::Unknown>,
+    eth_mac::MacRxPacketProducer<'static, MAC_RX_BUFFER_CAPACITY>,
 > = eth_phy::InterruptHandler::new();
 
-const MAC_RX_BUFFER_CAPACITY: usize = 10;
 static ETH_MAC_RX: eth_mac::MacRx<MAC_RX_BUFFER_CAPACITY> =
-    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new();
+    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new(&|| {
+        // When the MAC layer tells us that the RX queue has capacity again we need to forward that
+        // information to the interrupt handler so that it can re-enable the RX interrupt and start
+        // listening for incoming packets again.
+        ETH_INTERRUPT_HANDLER.rx_buffer_space_available();
+    });
 
 // This interrupt will fire every 16ms. We need to forward the interrupt calls to the handler.
 #[no_mangle]
@@ -99,6 +122,7 @@ fn main() -> ! {
     // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER and
     // ETH_MAC_RX we defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the
     // RX debug output signal.
+    let (mac_rx_producer, mac_rx_consumer) = ETH_MAC_RX.split();
     let eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
         clocks: &clocks,
         interrupt_handler: &ETH_INTERRUPT_HANDLER,
@@ -110,7 +134,7 @@ fn main() -> ! {
         // https://ctrlsrc.io/posts/2023/niccle-ethernet-circuit-design/#inverted-rx-signals for why
         // this is the case.
         rx_invert_signal: true,
-        rx_mac_callback: &ETH_MAC_RX,
+        rx_mac_callback: mac_rx_producer,
         rx_debug_pin: io.pins.gpio10.into_ref(),
     })
     .unwrap();
@@ -132,7 +156,8 @@ fn main() -> ! {
     // Set up an interface connected to the provided SmolMac. We use a hardcoded MAC and IP address,
     // and assume that the device is directly connected to the interface, and hence no routing
     // information is needed.
-    let mut smol_mac = eth_mac::smoltcp::SmolMac::new(&mut eth_mac_tx, &ETH_MAC_RX);
+    let mut smol_mac = eth_mac::smoltcp::SmolMac::new(&mut eth_mac_tx, mac_rx_consumer);
+    info!("Created MAC instance!");
     let rtc = Rtc::new(peripherals.LP_CLKRST);
     let mut iface = configure_iface(&mut smol_mac, &rtc);
 
@@ -191,7 +216,7 @@ fn do_http_request<'a, P: eth_mac::PhyTx<'a>, const BUFFER_CAP: usize>(
     rtc: &Rtc,
 ) {
     // Create sockets
-    let mut tcp_rx_buffer_raw = [0; 10240];
+    let mut tcp_rx_buffer_raw = [0; TCP_RX_BUFFER_CAPACITY];
     let mut tcp_tx_buffer_raw = [0; 10240];
     let tcp_rx_buffer = tcp::SocketBuffer::new(&mut tcp_rx_buffer_raw[..]);
     let tcp_tx_buffer = tcp::SocketBuffer::new(&mut tcp_tx_buffer_raw[..]);

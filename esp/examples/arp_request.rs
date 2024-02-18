@@ -17,19 +17,28 @@ use hal::{
     timer::TimerGroup, Delay, IO,
 };
 use log::{debug, info};
-use niccle::{debug_util::FormatEthernetFrame, eth_mac};
+use niccle::{
+    debug_util::FormatEthernetFrame,
+    eth_mac::{self, MAX_PACKET_SIZE},
+};
 use niccle_esp::eth_phy;
+
+// The buffer size isn't super critical for this example. Enough space for a few packets should be
+// sufficient.
+const MAC_RX_BUFFER_CAPACITY: usize = 5 * MAX_PACKET_SIZE;
 
 static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
     hal::timer::Timer0<hal::peripherals::TIMG0>,
     hal::gpio::Gpio5<hal::gpio::Unknown>,
     hal::gpio::Gpio6<hal::gpio::Unknown>,
     hal::gpio::Gpio10<hal::gpio::Unknown>,
+    eth_mac::MacRxPacketProducer<'static, MAC_RX_BUFFER_CAPACITY>,
 > = eth_phy::InterruptHandler::new();
 
-const MAC_RX_BUFFER_CAPACITY: usize = 10;
 static ETH_MAC_RX: eth_mac::MacRx<MAC_RX_BUFFER_CAPACITY> =
-    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new();
+    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new(&|| {
+        ETH_INTERRUPT_HANDLER.rx_buffer_space_available();
+    });
 
 #[entry]
 fn main() -> ! {
@@ -48,6 +57,7 @@ fn main() -> ! {
     // Configure the Ethernet Phy instance, linking it with the static ETH_INTERRUPT_HANDLER and
     // ETH_MAC_RX we defined above, and making it use GPIO5 for TX, GPIO6 for RX and GPIO10 for the
     // RX debug output signal.
+    let (mac_rx_producer, mut mac_rx_consumer) = ETH_MAC_RX.split();
     let eth_phy = eth_phy::Phy::new(eth_phy::PhyConfig {
         clocks: &clocks,
         interrupt_handler: &ETH_INTERRUPT_HANDLER,
@@ -59,7 +69,7 @@ fn main() -> ! {
         // https://ctrlsrc.io/posts/2023/niccle-ethernet-circuit-design/#inverted-rx-signals for why
         // this is the case.
         rx_invert_signal: true,
-        rx_mac_callback: &ETH_MAC_RX,
+        rx_mac_callback: mac_rx_producer,
         rx_debug_pin: io.pins.gpio10.into_ref(),
     })
     .unwrap();
@@ -97,7 +107,7 @@ fn main() -> ! {
         delay.delay_ms(2000u32);
 
         // Consume any frames that may have arrived since we last checked from the MacRx buffer.
-        while let Some(mut frame) = ETH_MAC_RX.receive() {
+        while let Some(mut frame) = mac_rx_consumer.receive() {
             debug!("<<< Consumed RX {}", FormatEthernetFrame(frame.data()));
         }
     }

@@ -19,6 +19,7 @@ use hal::{
 use heapless::FnvIndexMap;
 use log::info;
 use niccle::eth_mac;
+use niccle::eth_mac::MAX_PACKET_SIZE;
 use niccle_esp::eth_phy;
 use smoltcp::iface::Config;
 use smoltcp::iface::SocketStorage;
@@ -28,16 +29,22 @@ use smoltcp::socket::icmp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
 
+// The buffer size isn't super critical for this example. Enough space for a few packets should be
+// sufficient.
+const MAC_RX_BUFFER_CAPACITY: usize = 5 * MAX_PACKET_SIZE;
+
 static ETH_INTERRUPT_HANDLER: eth_phy::InterruptHandler<
     hal::timer::Timer0<hal::peripherals::TIMG0>,
     hal::gpio::Gpio5<hal::gpio::Unknown>,
     hal::gpio::Gpio6<hal::gpio::Unknown>,
     hal::gpio::Gpio10<hal::gpio::Unknown>,
+    eth_mac::MacRxPacketProducer<'static, MAC_RX_BUFFER_CAPACITY>,
 > = eth_phy::InterruptHandler::new();
 
-const MAC_RX_BUFFER_CAPACITY: usize = 10;
 static ETH_MAC_RX: eth_mac::MacRx<MAC_RX_BUFFER_CAPACITY> =
-    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new();
+    eth_mac::MacRx::<MAC_RX_BUFFER_CAPACITY>::new(&|| {
+        ETH_INTERRUPT_HANDLER.rx_buffer_space_available();
+    });
 
 // This interrupt will fire every 16ms. We need to forward the interrupt calls to the handler.
 #[no_mangle]
@@ -89,6 +96,8 @@ fn main() -> ! {
     esp_println::logger::init_logger_from_env();
     info!("Booted up!");
 
+    let (mac_rx_producer, mac_rx_consumer) = ETH_MAC_RX.split();
+
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
     let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
 
@@ -106,7 +115,7 @@ fn main() -> ! {
         // https://ctrlsrc.io/posts/2023/niccle-ethernet-circuit-design/#inverted-rx-signals for why
         // this is the case.
         rx_invert_signal: true,
-        rx_mac_callback: &ETH_MAC_RX,
+        rx_mac_callback: mac_rx_producer,
         rx_debug_pin: io.pins.gpio10.into_ref(),
     })
     .unwrap();
@@ -128,7 +137,7 @@ fn main() -> ! {
     // Set up an interface connected to the provided SmolMac. We use a hardcoded MAC and IP address,
     // and assume that the device is directly connected to the interface, and hence no routing
     // information is needed.
-    let mut smol_mac = eth_mac::smoltcp::SmolMac::new(&mut eth_mac_tx, &ETH_MAC_RX);
+    let mut smol_mac = eth_mac::smoltcp::SmolMac::new(&mut eth_mac_tx, mac_rx_consumer);
     let rtc = Rtc::new(peripherals.LP_CLKRST);
     let mut iface = configure_iface(&mut smol_mac, &rtc);
 
