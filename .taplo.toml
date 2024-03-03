@@ -1,3 +1,10 @@
 [formatting]
 reorder_arrays = true
 reorder_keys = true
+
+
+[[rule]]
+include = [".cargo/config.toml"]
+
+[rule.formatting]
+reorder_arrays = false

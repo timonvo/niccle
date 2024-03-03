@@ -3,6 +3,12 @@
 # A baud rate of 921600 is high, but it seems to work fine for me and speeds up the flashing time.
 runner = "espflash flash --baud=921600 --monitor"
 rustflags = [
+  # Ensures that key functions are placed in RAM. This ensures that we don't get stuck waiting on
+  # the CPU to load instructions from flash into RAM at critical times, e.g. while processing an
+  # incoming packet. We must do this via a linker script, because we cannot use the `#[ram]`
+  # annotation on code for crates we depend on and don't own ourselves.
+  "-C",
+  "link-arg=-Tesp/ld/place_hot_functions_in_ram.x",
   "-C",
   "link-arg=-Tlinkall.x",
   # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
