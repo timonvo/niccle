@@ -520,6 +520,7 @@ name = "niccle_esp"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "crc32fast",
  "critical-section",
  "esp-backtrace",
  "esp-println 0.8.0",

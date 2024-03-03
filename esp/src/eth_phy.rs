@@ -325,6 +325,11 @@ impl<
 
             resources.rx_pin.clear_interrupt();
         });
+
+        // Lastly, let's emit a double debug signal at the very end, to signify we're about to
+        // return from the interrupt routine.
+        eth_phy_dedicated_io::emit_receive_interrupt_debug_signal();
+        eth_phy_dedicated_io::emit_receive_interrupt_debug_signal();
     }
 }
 

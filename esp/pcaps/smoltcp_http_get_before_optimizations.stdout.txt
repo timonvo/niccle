@@ -1,0 +1,29 @@
+INFO - Booted up!
+INFO - === Issuing 5 HTTP GET requests for /10kB.txt
+INFO - Received 10068 bytes over 3.302s (3.0kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 1.526s (6.6kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 1.495s (6.7kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 1.523s (6.6kB/sec) with CRC32 2361199371
+INFO - Received 10068 bytes over 1.519s (6.6kB/sec) with CRC32 2361199371
+INFO - --- Stats ---
+INFO - PHY TX: Packets:     71,                    LTPs:            620
+INFO - PHY RX: Packets:    110, trunc:          2, LTPs:            578
+INFO - MAC RX: Packets:     66, invalid SFD:   30, invalid CRC:      14
+INFO -         Consumed:    66, dropped:        0
+INFO - 
+INFO - === Issuing 5 HTTP GET requests for /100kB.txt
+INFO - Received 100069 bytes over 6.143s (16.3kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 9.449s (10.6kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 34.526s (2.9kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 21.241s (4.7kB/sec) with CRC32 3505040786
+INFO - Received 100069 bytes over 18.032s (5.5kB/sec) with CRC32 3505040786
+INFO - --- Stats ---
+INFO - PHY TX: Packets:    514,                    LTPs:           5972
+INFO - PHY RX: Packets:    635, trunc:          9, LTPs:           5588
+INFO - MAC RX: Packets:    444, invalid SFD:  147, invalid CRC:      44
+INFO -         Consumed:   444, dropped:        0
+INFO - 
+INFO - === Issuing 5 HTTP GET requests for /1MB.txt
+INFO - Received 1000070 bytes over 74.507s (13.4kB/sec) with CRC32 2795970732
+INFO - Received 1000070 bytes over 117.718s (8.5kB/sec) with CRC32 2795970732
+^C
